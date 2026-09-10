@@ -1,0 +1,89 @@
+package main
+
+import (
+	"context"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"sellingbot/internal/api"
+	"sellingbot/internal/config"
+	"sellingbot/internal/db"
+	"sellingbot/internal/images"
+	"sellingbot/internal/scheduler"
+	"sellingbot/internal/whatsapp"
+	migembed "sellingbot/migrations"
+	webdist "sellingbot/web/dist"
+)
+
+func main() {
+	cfg := config.Load()
+	log.Printf("sellingbot starting port=%s whatsapp=%v datadir=%s", cfg.Port, cfg.WhatsappEnabled, cfg.DataDir)
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		log.Fatal(err)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("db connect: %v", err)
+	}
+	if err := runEmbeddedMigrations(ctx, pool); err != nil {
+		log.Fatalf("migrate: %v", err)
+	}
+	if err := db.SeedAdmin(ctx, pool, cfg.SeedEmail, cfg.SeedPassword); err != nil {
+		log.Fatalf("seed: %v", err)
+	}
+
+	st, err := images.New(cfg.DataDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	wa := whatsapp.New(pool, cfg.DataDir, cfg.WhatsappEnabled)
+	go wa.Start(ctx)
+	go scheduler.Followups(ctx, pool, wa)
+
+	webHTTP := http.FS(webdist.FS)
+
+	srv := &api.Server{Pool: pool, Secret: cfg.JWTSecret, WA: wa, Images: st, DataDir: cfg.DataDir, StartedAt: time.Now()}
+	httpSrv := &http.Server{Addr: ":" + cfg.Port, Handler: srv.Router(webHTTP)}
+
+	go func() {
+		log.Printf("listening :%s", cfg.Port)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+	<-ctx.Done()
+	shut, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	_ = httpSrv.Shutdown(shut)
+	pool.Close()
+}
+
+func runEmbeddedMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	des, err := fs.ReadDir(migembed.FS, ".")
+	if err != nil {
+		return err
+	}
+	for _, d := range des {
+		if d.IsDir() {
+			continue
+		}
+		b, err := migembed.FS.ReadFile(d.Name())
+		if err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, string(b)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
