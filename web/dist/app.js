@@ -18,11 +18,22 @@ async function dash(){ const r=await fetch('/api/dashboard',{headers:H()}); cons
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function tbl(rows, cols){ if(!rows.length) return '<i>empty</i>';
   return '<table><tr>'+cols.map(c=>`<th>${esc(c)}</th>`).join('')+'</tr>'+rows.map(o=>'<tr>'+cols.map(c=>`<td>${esc((o[c]??'').toString().slice(0,120))}</td>`).join('')+'</tr>').join('')+'</table>'; }
+let qrTimer = null;
 async function waStatus(){ const r=await fetch('/api/whatsapp/status',{headers:H()}); const j=await r.json();
   document.getElementById('waOut').textContent=JSON.stringify(j,null,2);
   const w=document.getElementById('qrWrap');
-  if(j.has_qr){ w.innerHTML='<p>Scan QR with WhatsApp > Linked devices:</p><img class=qr src="/api/whatsapp/qr" />'; }
+  if(qrTimer){ clearTimeout(qrTimer); qrTimer=null; }
+  if(j.has_qr){ w.innerHTML='<p>Scan QR with WhatsApp > Linked devices:</p><img class=qr id="qrImg" />'; loadQR();
+    qrTimer=setTimeout(()=>{ if(document.getElementById('s-wa').classList.contains('active')) waStatus(); }, 20000);
+  }
   else w.innerHTML=''; }
+async function loadQR(){ try{
+    const r=await fetch('/api/whatsapp/qr',{headers:H()});
+    if(!r.ok) return;
+    const b=await r.blob();
+    const img=document.getElementById('qrImg');
+    if(img) img.src=URL.createObjectURL(b);
+  }catch(e){} }
 async function waLogout(){ await fetch('/api/whatsapp/logout',{method:'POST',headers:H()}); waStatus(); }
 async function loadLeads(){ const r=await fetch('/api/leads?limit=50',{headers:H()}); const j=await r.json(); document.getElementById('leads').innerHTML=tbl(j,['id','customer','phone','intent','status','state']); }
 async function loadConv(){ const r=await fetch('/api/conversations?limit=30',{headers:H()}); const j=await r.json(); document.getElementById('conv').innerHTML=tbl(j,['id','name','phone','status','messages']); }
