@@ -1,5 +1,5 @@
 # Single-service Railway build. No Node stage: admin is prebuilt static in web/dist.
-FROM golang:1.22-bookworm AS build
+FROM golang:1.27-bookworm AS build
 RUN apt-get update && apt-get install -y gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY go.mod go.sum ./
