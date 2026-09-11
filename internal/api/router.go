@@ -118,6 +118,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"ok": true, "db": dbOK, "disk": disk, "disk_used_pct": diskPct,
+		"timezone": whatsapp.ZoneName(),
 		"whatsapp": s.WA.Status(), "time": time.Now().UTC(),
 	})
 }
@@ -243,6 +244,10 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.metrics(w, r)
 	case p == "/api/conversations" && r.Method == "PATCH":
 		s.patchConversation(w, r)
+	case p == "/api/settings" && r.Method == "GET":
+		s.listSettings(w, r)
+	case p == "/api/settings" && r.Method == "PATCH":
+		s.patchSettings(w, r)
 	case p == "/api/whatsapp/status" && r.Method == "GET":
 		writeJSON(w, s.WA.Status())
 	case p == "/api/whatsapp/qr" && r.Method == "GET":

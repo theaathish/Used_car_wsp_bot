@@ -166,6 +166,11 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <input id="u_email" placeholder="email"/><input id="u_pass" placeholder="password" type="password"/>
 <select id="u_role"><option value="sales">sales</option><option value="admin">admin</option></select>
 <button class="primary" onclick="addUser()">Create</button></div></div></section>
+<section id="s-set"><h3>Settings <span class="muted small">(admin only)</span></h3>
+<div class="panel"><h4>Business timezone</h4>
+<p class="muted small">Used for test-drive confirmations, reminders, and interpreting "today / tomorrow". Applies instantly — no redeploy.</p>
+<div class="row"><select id="set_tz" style="min-width:260px"></select><button class="primary" onclick="saveSettings()">Save</button></div>
+<div id="setOut" class="muted small"></div></div></section>
 <section id="s-sim"><h3>WhatsApp simulator <span class="muted small">(same engine, no phone needed)</span></h3>
 <div class="row"><input id="sim_phone" value="9999999999"/><input id="sim_body" placeholder="hi / BUY / 4 lakh …" style="min-width:260px" onkeydown="if(event.key==='Enter')sim()"/><button class="primary" onclick="sim()">Send</button>
 <button onclick="document.getElementById('simThread').innerHTML=''">Clear</button></div>

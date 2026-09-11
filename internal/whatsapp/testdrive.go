@@ -17,8 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var ist = time.FixedZone("IST", 5*3600+1800)
-
 type tdVehicle struct {
 	id, make, model string
 }
@@ -75,7 +73,7 @@ func parseTestDrive(body string, candidates []tdVehicle, now time.Time) tdResult
 	}
 
 	// Date.
-	todayIST := now.In(ist)
+	todayIST := now.In(Zone())
 	day := todayIST.Truncate(24 * time.Hour)
 	dateFound := false
 	switch {
@@ -100,7 +98,7 @@ func parseTestDrive(body string, candidates []tdVehicle, now time.Time) tdResult
 				yy = y
 			}
 			if dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12 {
-				day = time.Date(yy, time.Month(mm), dd, 0, 0, 0, 0, ist)
+				day = time.Date(yy, time.Month(mm), dd, 0, 0, 0, 0, Zone())
 				if day.Before(todayIST.Truncate(24 * time.Hour)) {
 					day = day.AddDate(1, 0, 0)
 				}
@@ -169,7 +167,7 @@ func parseTestDrive(body string, candidates []tdVehicle, now time.Time) tdResult
 		r.needTime = true
 		return r
 	}
-	at := time.Date(day.Year(), day.Month(), day.Day(), hour, min, 0, 0, ist)
+	at := time.Date(day.Year(), day.Month(), day.Day(), hour, min, 0, 0, Zone())
 	if !at.After(now.Add(30 * time.Minute)) {
 		r.past = true
 		return r
@@ -240,5 +238,5 @@ func (w *Worker) bookTestDriveTx(ctx context.Context, tx pgx.Tx, leadID, custID,
 	_, _ = tx.Exec(ctx, `UPDATE leads SET status='TEST_DRIVE' WHERE id=$1`, leadID)
 	_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message) VALUES($1,$2,'post_match',now()+interval '24 hours','Follow up after test drive') ON CONFLICT DO NOTHING`, custID, leadID)
 	return fmt.Sprintf("Test drive confirmed: *%s %s* on %s. We'll remind you before. Reply here to change it.",
-		mk, md, res.at.In(ist).Format("Mon 2 Jan, 3:04 PM")), false
+		mk, md, FormatTime(res.at)), false
 }

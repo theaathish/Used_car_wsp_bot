@@ -61,7 +61,7 @@ function logout() { localStorage.removeItem('token'); location.reload(); }
 /* ---------- nav ---------- */
 const NAV = [['dash', 'Dashboard'], ['wa', 'WhatsApp'], ['cust', 'Customers'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
   ['td', 'Test Drives'], ['fu', 'Follow-ups'], ['bk', 'Bookings'], ['neg', 'Negotiations'], ['fin', 'Finance'],
-  ['sell', 'Sell Requests'], ['rev', 'Reviews'], ['team', 'Team'], ['sim', 'Simulator']];
+  ['sell', 'Sell Requests'], ['rev', 'Reviews'], ['team', 'Team'], ['set', 'Settings'], ['sim', 'Simulator']];
 function buildNav() {
   document.getElementById('nav').innerHTML = NAV.filter(function (n) { return n[0] !== 'team' || ME.role === 'admin'; })
     .map(function (n) { return '<button id="nav-' + n[0] + '" onclick="show(\'' + n[0] + '\')"><span class="t">' + n[1] + '</span><span class="n" id="badge-' + n[0] + '"></span></button>'; }).join('');
@@ -87,7 +87,7 @@ async function boot() {
   ['NEW', 'CONTACTED', 'QUALIFIED', 'TEST_DRIVE', 'FOLLOWUP', 'BOOKED', 'CONVERTED', 'LOST'].forEach(function (s) {
     const o = document.createElement('option'); o.textContent = s; st.appendChild(o);
   });
-  dash(); waStatus(); loadCust(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadFU(); loadBK(); loadNG(); loadFIN(); loadSELL(); loadRV(); loadUsers();
+  dash(); waStatus(); loadCust(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadFU(); loadBK(); loadNG(); loadFIN(); loadSELL(); loadRV(); loadUsers(); loadSettings();
 }
 async function reloadLookups() {
   const l = await api('GET', '/api/leads?limit=200'); LEADS = l.ok ? l.data : [];
@@ -121,7 +121,7 @@ async function refreshHealth() {
     document.getElementById('hDb').innerHTML = pill(j.db ? 'connected' : 'DOWN').replace('connected', 'DB ✓').replace('DOWN', 'DB ✗');
     const w = (j.whatsapp && j.whatsapp.status) || '?';
     document.getElementById('hWa').innerHTML = '<span class="pill ' + (w === 'connected' ? 'p-green' : w === 'qr' ? 'p-amber' : 'p-gray') + '">WA: ' + esc(w) + '</span>';
-    document.getElementById('hDisk').textContent = j.disk_used_pct >= 0 ? 'disk ' + j.disk_used_pct + '%' : '';
+    document.getElementById('hDisk').textContent = (j.disk_used_pct >= 0 ? 'disk ' + j.disk_used_pct + '%' : '') + (j.timezone ? ' · ' + j.timezone : '');
   } catch (e) {}
 }
 
@@ -466,6 +466,24 @@ async function loadUsers() {
 async function addUser() {
   const r = await api('POST', '/api/users', {email: val('u_email'), password: document.getElementById('u_pass').value, role: val('u_role')});
   if (r.ok) { toast('Member added'); document.getElementById('u_email').value = ''; document.getElementById('u_pass').value = ''; loadUsers(); }
+}
+
+/* ---------- settings ---------- */
+const ZONES = ['Asia/Kolkata', 'Asia/Colombo', 'Asia/Dubai', 'Asia/Muscat', 'Asia/Qatar', 'Asia/Riyadh', 'Asia/Kuwait', 'Asia/Singapore', 'Asia/Kuala_Lumpur', 'Europe/London', 'UTC'];
+async function loadSettings() {
+  if (ME.role !== 'admin') return;
+  const sel = document.getElementById('set_tz');
+  sel.innerHTML = ZONES.map(function (z) { return '<option>' + z + '</option>'; }).join('');
+  const r = await api('GET', '/api/settings');
+  if (r.ok && r.data.timezone) {
+    if (!ZONES.includes(r.data.timezone)) { const o = document.createElement('option'); o.textContent = r.data.timezone; sel.appendChild(o); }
+    sel.value = r.data.timezone;
+    document.getElementById('setOut').textContent = 'Current: ' + r.data.timezone;
+  }
+}
+async function saveSettings() {
+  const r = await api('PATCH', '/api/settings', {timezone: document.getElementById('set_tz').value});
+  if (r.ok) { toast('Timezone updated — applies to new messages instantly'); loadSettings(); refreshHealth(); }
 }
 
 /* ---------- simulator ---------- */

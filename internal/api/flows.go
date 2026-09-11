@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"sellingbot/internal/auth"
+	"sellingbot/internal/whatsapp"
 )
 
 func isAdmin(r *http.Request) bool {
@@ -506,7 +507,52 @@ func (s *Server) listOutbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// PATCH /api/conversations?id= — human takeover toggle / close (STATE-007).
+// GET /api/settings (admin) — business settings incl. timezone.
+func (s *Server) listSettings(w http.ResponseWriter, r *http.Request) {
+	if !isAdmin(r) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	rows, err := s.Pool.Query(r.Context(), `SELECT key, value FROM settings ORDER BY key`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err == nil {
+			out[k] = v
+		}
+	}
+	writeJSON(w, out)
+}
+
+// PATCH /api/settings {timezone} (admin) — live, no redeploy.
+func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
+	if !isAdmin(r) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	var in struct {
+		Timezone string `json:"timezone"`
+	}
+	if err := readJSON(r, &in); err != nil || in.Timezone == "" {
+		http.Error(w, `{"error":"timezone required"}`, 400)
+		return
+	}
+	if _, err := whatsapp.SetZone(in.Timezone); err != nil {
+		http.Error(w, `{"error":"unknown timezone"}`, 400)
+		return
+	}
+	if _, err := s.Pool.Exec(r.Context(), `INSERT INTO settings(key,value,updated_at) VALUES('timezone',$1,now())
+		ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=now()`, in.Timezone); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "timezone": in.Timezone})
+}
 func (s *Server) patchConversation(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	var in struct {

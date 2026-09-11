@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"sellingbot/internal/api"
@@ -59,6 +60,19 @@ func main() {
 	}
 	if err := db.SeedAdmin(ctx, pool, cfg.SeedEmail, cfg.SeedPassword); err != nil {
 		log.Fatalf("seed: %v", err)
+	}
+
+	// Business timezone: DB setting wins, else TIMEZONE env, else IST.
+	zoneName := cfg.Timezone
+	var dbZone string
+	if err := pool.QueryRow(ctx, `SELECT value FROM settings WHERE key='timezone'`).Scan(&dbZone); err == nil && dbZone != "" {
+		zoneName = dbZone
+	}
+	if _, err := whatsapp.SetZone(zoneName); err != nil {
+		log.Printf("bad timezone %q, using IST: %v", zoneName, err)
+		whatsapp.SetZone("Asia/Kolkata")
+	} else {
+		log.Printf("business timezone: %s", whatsapp.ZoneName())
 	}
 
 	st, err := images.New(cfg.DataDir)

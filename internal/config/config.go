@@ -13,6 +13,7 @@ type Config struct {
 	WhatsappEnabled bool
 	SeedEmail       string
 	SeedPassword    string
+	Timezone        string
 }
 
 func Load() Config {
@@ -23,6 +24,7 @@ func Load() Config {
 		DataDir:      envOr("DATA_DIR", "./data"),
 		SeedEmail:    envOr("ADMIN_SEED_EMAIL", "admin@local.test"),
 		SeedPassword: envOr("ADMIN_SEED_PASSWORD", "admin123"),
+		Timezone:     envOr("TIMEZONE", "Asia/Kolkata"),
 	}
 	c.WhatsappEnabled = envBool("WHATSAPP_ENABLED", true)
 	return c

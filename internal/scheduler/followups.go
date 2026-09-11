@@ -122,7 +122,7 @@ func remindTestDrives(ctx context.Context, pool *pgxpool.Pool, w *whatsapp.Worke
 		if exists {
 			continue
 		}
-		msg := "Reminder: your test drive for " + it.make + " " + it.model + " is at " + it.at.Local().Format("Mon 3:04 PM") + ". Reply here to reschedule."
+		msg := "Reminder: your test drive for " + it.make + " " + it.model + " is at " + whatsapp.FormatTime(it.at) + ". Reply here to reschedule."
 		marker := "[" + it.id + "] " + msg
 		// Claim first: unique index makes the second claimer fail, so a
 		// restart (REM-003) or overlapping tick can never double-send.
