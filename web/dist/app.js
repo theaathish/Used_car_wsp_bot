@@ -303,7 +303,7 @@ function renderVeh() {
     if (o.status === 'RESERVED') acts = '<button class="small" onclick="vehStatus(\'' + o.id + '\',\'AVAILABLE\')">Release</button> <button class="small" onclick="vehStatus(\'' + o.id + '\',\'SOLD\')">Mark sold</button>';
     if (o.status === 'BOOKED') acts = '<button class="small" onclick="vehStatus(\'' + o.id + '\',\'DELIVERED\')">Delivered</button> <button class="small" onclick="vehStatus(\'' + o.id + '\',\'AVAILABLE\')">Release</button>';
     const delBtn = ME.role === 'admin' ? ' <button class="small danger" onclick="delVeh(\'' + o.id + '\',\'' + esc(o.make + ' ' + o.model).replace(/'/g, "\\'") + '\')">Delete</button>' : '';
-    return '<div class="vcard">' + (imgs.length ? '<img src="' + esc(imgs[0]) + '" loading="lazy"/>' : '') +
+    return '<div class="vcard">' + (imgs.length ? '<img src="' + esc(imgs[0]) + '" loading="lazy" onerror="this.remove()"/>' : '') +
       '<div class="b"><div class="t">' + esc(o.make) + ' ' + esc(o.model) + ' ' + esc(o.year) + '</div>' +
       '<div class="spec">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + Number(o.km || 0).toLocaleString('en-IN') + ' km</div>' +
       '<div class="price">' + fmtMoney(o.price) + '</div>' + pill(o.status) + ' ' + sid(o.id) +
