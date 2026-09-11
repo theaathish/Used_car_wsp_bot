@@ -78,6 +78,17 @@ func ParseBudget(s string) (int, int) {
 
 func norm(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
 
+// isGreeting matches hello-type openers across English + common transliterations.
+func isGreeting(body string) bool {
+	b := norm(body)
+	for _, g := range []string{"hi", "hello", "hey", "yo", "hai", "vanakkam", "namaste", "namaskar", "good morning", "good evening", "good afternoon", "h"} {
+		if b == g || strings.HasPrefix(b, g+" ") || strings.HasSuffix(b, " "+g) {
+			return true
+		}
+	}
+	return false
+}
+
 func hasBudget(s string) bool {
 	_, mx := ParseBudget(s)
 	return mx > 0
@@ -357,6 +368,16 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			return Next("ASK_INTENT", body, data)
 		}
 		return "ASK_INTENT", "Welcome to AutoKart! Are you looking to *BUY*, *SELL* or *EXCHANGE* a car?", "", "CONTACTED", patch
+	case "DONE":
+		// Finished flows restart instead of trapping the user in the
+		// fallback reply: wipe stale answers, then route like a new chat.
+		for k := range data {
+			delete(data, k)
+		}
+		if isGreeting(body) {
+			return "ASK_INTENT", "Welcome back! Are you looking to *BUY*, *SELL* or *EXCHANGE* a car?", "", "CONTACTED", patch
+		}
+		return Next("ASK_INTENT", body, data)
 	case "ASK_INTENT":
 		switch {
 		case wantsBuy(b):

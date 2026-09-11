@@ -183,6 +183,32 @@ func TestParseBudget(t *testing.T) {
 	}
 }
 
+func TestDoneRestarts(t *testing.T) {
+	// Stale answers must be wiped: a finished flow restarts cleanly.
+	data := map[string]string{"budget_max": "500000", "brand": "Maruti", "state": "x"}
+	st, rep, intent, _, _ := Next("DONE", "buy", data)
+	if st != "BUY_BUDGET" || intent != "BUY" {
+		t.Fatalf("DONE+buy: %s %s %s", st, intent, rep)
+	}
+	if len(data) != 0 {
+		t.Fatalf("stale data not wiped: %+v", data)
+	}
+	st, rep, _, _, _ = Next("DONE", "h", map[string]string{"brand": "BMW"})
+	if st != "ASK_INTENT" || !strings.Contains(rep, "Welcome back") {
+		t.Fatalf("DONE+greeting: %s %s", st, rep)
+	}
+	st, _, _, _, _ = Next("DONE", "blah blah", map[string]string{})
+	if st != "ASK_INTENT" {
+		t.Fatalf("DONE+garbage: %s", st)
+	}
+	// Same-intent restart (the reported trap): BUY intent, DONE state.
+	st, _, intent, _, _ = Next("DONE", "BUY", map[string]string{})
+	if st == "DONE" {
+		t.Fatal("same-intent restart still trapped in DONE")
+	}
+	_ = intent
+}
+
 func TestTolerantIntents(t *testing.T) {
 	for _, s := range []string{"buy", "BUY", "I want to buy", "I need a car", "Looking for a car", "bro BMW venum", "car venum", "gaadi chahiye"} {
 		if !wantsBuy(norm(s)) {
