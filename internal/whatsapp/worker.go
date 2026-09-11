@@ -674,7 +674,11 @@ func (w *Worker) HandleMedia(ctx context.Context, phone, name, waMsgID string, d
 		return "", nil
 	}
 	ack := "Photo received and saved."
-	if state == "SELL_PHOTOS" {
+	if state == "DONE" {
+		// Request already closed (e.g. valuation recorded): don't reopen the
+		// flow with photo noise, just close the loop politely.
+		ack = "Thanks! Your request is already recorded — our team will call you. Reply BUY, SELL or EXCHANGE for anything new."
+	} else if state == "SELL_PHOTOS" {
 		data := map[string]string{}
 		_ = json.Unmarshal(stateRaw, &data)
 		n := atoi(data["sell_photos"]) + 1

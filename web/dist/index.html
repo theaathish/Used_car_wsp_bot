@@ -6,77 +6,169 @@
 <link rel="icon" href="data:,"/>
 <title>AutoKart Admin</title>
 <style>
-body{font-family:system-ui,sans-serif;margin:0;background:#0f1115;color:#e8eaf0}
-header{display:flex;gap:12px;align-items:center;padding:12px 16px;background:#171a21;position:sticky;top:0}
-input,select,button,textarea{background:#22262f;color:#fff;border:1px solid #333a47;border-radius:8px;padding:8px 10px}
-button{cursor:pointer}button.primary{background:#4f7cff;border-color:#4f7cff}
-main{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
-nav{padding:12px;display:flex;flex-direction:column;gap:6px;background:#13161c}
-nav button{text-align:left}
-section{padding:16px;display:none}section.active{display:block}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #262b35;padding:8px;text-align:left;vertical-align:top}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
-.card{background:#171a21;padding:14px;border-radius:12px}.card b{font-size:22px}
-.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
-pre{background:#00000055;padding:10px;border-radius:8px;overflow:auto;max-height:300px}
-#login{max-width:360px;margin:10vh auto;padding:20px;background:#171a21;border-radius:12px}
+:root{--bg:#0f1115;--panel:#171a21;--panel2:#13161c;--line:#262b35;--txt:#e8eaf0;--dim:#9aa3b2;--acc:#4f7cff;--ok:#34c77b;--warn:#e8a13c;--bad:#e56060;--info:#5aa9e6}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:var(--bg);color:var(--txt);font-size:14px}
+header{display:flex;gap:10px;align-items:center;padding:10px 16px;background:var(--panel);position:sticky;top:0;z-index:5;border-bottom:1px solid var(--line)}
+header .brand{font-weight:700;font-size:16px}
+.pill{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;white-space:nowrap}
+.p-green{background:#123f2b;color:#5eeaa0}.p-amber{background:#4a3413;color:#f5b95c}.p-blue{background:#1b3a5c;color:#7cc0f5}
+.p-gray{background:#2a2e37;color:#aab2c0}.p-red{background:#552222;color:#f08a8a}
+input,select,button,textarea{background:#22262f;color:#fff;border:1px solid #333a47;border-radius:8px;padding:8px 10px;font-size:13px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
+button{cursor:pointer}button:hover{border-color:var(--acc)}button.primary{background:var(--acc);border-color:var(--acc)}
+button.danger{border-color:var(--bad);color:#f08a8a}button.small{padding:4px 8px;font-size:12px}
+main{display:grid;grid-template-columns:210px 1fr;min-height:calc(100vh - 53px)}
+nav{padding:12px;display:flex;flex-direction:column;gap:4px;background:var(--panel2);border-right:1px solid var(--line)}
+nav button{text-align:left;border-color:transparent;background:transparent}
+nav button.on{background:#22262f;border-color:#333a47}
+nav button .n{float:right;opacity:.6;font-size:12px}
+section{padding:18px;display:none;max-width:1200px}section.active{display:block}
+h3{margin:0 0 12px}h4{margin:18px 0 8px;color:var(--dim)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--panel);padding:14px;border-radius:12px;border:1px solid var(--line);cursor:pointer}
+.card:hover{border-color:var(--acc)}.card .l{color:var(--dim);font-size:12px}.card b{font-size:24px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}main{grid-template-columns:64px 1fr}nav button span.t{display:none}}
+table{width:100%;border-collapse:collapse;font-size:13px;background:var(--panel);border-radius:12px;overflow:hidden}
+th,td{padding:9px 10px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase}
+tr:last-child td{border-bottom:none}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;align-items:center}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:16px}
+.panel h4{margin-top:0}
+.muted{color:var(--dim)}.small{font-size:12px}
+.id{font-family:monospace;font-size:11px;color:var(--dim);cursor:pointer}
+.empty{padding:24px;text-align:center;color:var(--dim);background:var(--panel);border-radius:12px;border:1px dashed var(--line)}
+/* conversations */
+.convwrap{display:grid;grid-template-columns:300px 1fr;gap:14px;height:calc(100vh - 160px)}
+.convlist{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:auto}
+.convitem{padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+.convitem:hover{background:#1c2029}.convitem.on{background:#22262f;border-left:3px solid var(--acc)}
+.convitem .nm{font-weight:600}.convitem .ph{color:var(--dim);font-size:12px}
+.thread{background:var(--panel);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;overflow:hidden}
+.msgs{flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:8px;background:#0b0d11}
+.bub{max-width:75%;padding:8px 12px;border-radius:12px;font-size:13px;line-height:1.45}
+.bub.in{background:#22262f;align-self:flex-start;border-bottom-left-radius:4px}
+.bub.out{background:#1b3a5c;align-self:flex-end;border-bottom-right-radius:4px}
+.bub .ts{display:block;font-size:10px;opacity:.55;margin-top:4px}
+.bub img{max-width:220px;border-radius:8px;display:block;margin-top:6px}
+.replybar{display:flex;gap:8px;padding:10px;border-top:1px solid var(--line)}
+.replybar input{flex:1}
+/* vehicles */
+.vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+.vcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.vcard img{width:100%;height:150px;object-fit:cover;background:#0b0d11}
+.vcard .b{padding:12px}.vcard .t{font-weight:700;font-size:15px}
+.vcard .spec{color:var(--dim);font-size:12px;margin:4px 0}
+.vcard .price{font-size:18px;font-weight:700;color:#5eeaa0;margin:6px 0}
+.vcard .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.thumbs{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.thumbs img{width:56px;height:56px;object-fit:cover;border-radius:6px}
+/* login + toast */
+#login{max-width:360px;margin:10vh auto;padding:24px;background:var(--panel);border-radius:12px;border:1px solid var(--line)}
 .hidden{display:none}
+#toast{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:99}
+.toast{background:#22262f;border:1px solid var(--acc);padding:10px 14px;border-radius:10px;font-size:13px;box-shadow:0 4px 16px #0008}
+.toast.err{border-color:var(--bad)}
 img.qr{background:#fff;padding:8px;border-radius:8px}
+.simthread{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto;margin-top:12px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.toolbar input[type=search]{min-width:200px}
 </style>
 </head>
 <body>
 <div id="login">
-<h2>AutoKart Admin</h2>
-<p style="opacity:.7">Login with ADMIN_SEED_EMAIL / ADMIN_SEED_PASSWORD</p>
-<input id="email" placeholder="email" style="width:100%;margin-bottom:8px"/>
-<input id="password" type="password" placeholder="password" style="width:100%;margin-bottom:8px"/>
+<h2 style="margin-top:0">AutoKart Admin</h2>
+<p class="muted">Sign in with your admin or sales account.</p>
+<input id="email" placeholder="email" autocomplete="username" style="width:100%;margin-bottom:8px"/>
+<input id="password" type="password" placeholder="password" autocomplete="current-password" style="width:100%;margin-bottom:8px"/>
 <button class="primary" onclick="login()" style="width:100%">Login</button>
-<pre id="loginErr"></pre>
+<pre id="loginErr" class="muted"></pre>
 </div>
 <div id="app" class="hidden">
 <header>
-<b>AutoKart</b><span id="health" style="opacity:.7"></span><span style="flex:1"></span>
-<button onclick="logout()">Logout</button>
+<span class="brand">AutoKart</span>
+<span id="hDb"></span><span id="hWa"></span><span id="hDisk" class="muted small"></span>
+<span style="flex:1"></span><span id="meEmail" class="muted small"></span>
+<button class="small" onclick="logout()">Logout</button>
 </header>
 <main>
-<nav>
-<button onclick="show('dash')">Dashboard</button>
-<button onclick="show('wa')">WhatsApp</button>
-<button onclick="show('leads')">Leads</button>
-<button onclick="show('conv')">Conversations</button>
-<button onclick="show('veh')">Vehicles</button>
-<button onclick="show('td')">Test Drives</button>
-<button onclick="show('fu')">Follow-ups</button>
-<button onclick="show('bk')">Bookings</button>
-<button onclick="show('neg')">Negotiations</button>
-<button onclick="show('fin')">Finance</button>
-<button onclick="show('sell')">Sell Requests</button>
-<button onclick="show('rev')">Reviews</button>
-<button onclick="show('team')">Team</button>
-<button onclick="show('sim')">Simulator</button>
-</nav>
+<nav id="nav"></nav>
 <div>
-<section id="s-dash" class="active"><h3>Dashboard</h3><div class="cards" id="cards"></div></section>
-<section id="s-wa"><h3>WhatsApp</h3><div class="row"><button onclick="waStatus()">Refresh</button><button onclick="waLogout()">Logout session</button></div><pre id="waOut"></pre><div id="qrWrap"></div></section>
-<section id="s-leads"><h3>Leads</h3><div class="row"><button onclick="loadLeads()">Reload</button></div><div id="leads"></div></section>
-<section id="s-conv"><h3>Conversations</h3><div class="row"><button onclick="loadConv()">Reload</button></div><div id="conv"></div><h4>Messages</h4><div class="row"><input id="convId" placeholder="conversation_id"/><button onclick="loadMsg()">Load</button></div><pre id="msg"></pre></section>
+<section id="s-dash"><h3>Dashboard</h3><div class="cards" id="cards"></div>
+<div class="grid2"><div class="panel"><h4>Needs attention</h4><div id="attention"></div></div>
+<div class="panel"><h4>Latest conversations</h4><div id="recentConv"></div></div></div></section>
+<section id="s-wa"><h3>WhatsApp connection</h3><div id="waCard"></div>
+<div class="row"><button onclick="waStatus()">Refresh</button><button class="danger" onclick="waLogout()">Logout session</button></div>
+<div id="qrWrap"></div></section>
+<section id="s-leads"><h3>Leads</h3>
+<div class="toolbar"><input type="search" id="q_leads" placeholder="Search name / phone…" oninput="loadLeads()"/>
+<select id="f_lead_status" onchange="loadLeads()"><option value="">All statuses</option></select>
+<select id="f_lead_intent" onchange="loadLeads()"><option value="">All intents</option><option>BUY</option><option>SELL</option><option>EXCHANGE</option></select></div>
+<div id="leads"></div></section>
+<section id="s-conv"><h3>Conversations</h3>
+<div class="toolbar"><input type="search" id="q_conv" placeholder="Search name / phone…" oninput="renderConvList()"/></div>
+<div class="convwrap"><div class="convlist" id="convList"></div>
+<div class="thread"><div id="threadHead" class="muted" style="padding:10px 14px;border-bottom:1px solid var(--line)">Pick a conversation</div>
+<div class="msgs" id="thread"></div>
+<div class="replybar"><input id="replyBox" placeholder="Reply as AutoKart…" onkeydown="if(event.key==='Enter')sendReply()"/><button class="primary" onclick="sendReply()">Send</button></div></div></div></section>
 <section id="s-veh"><h3>Vehicles</h3>
-<div class="row"><input id="v_make" placeholder="Make"/><input id="v_model" placeholder="Model"/><input id="v_year" placeholder="Year" type="number"/><input id="v_price" placeholder="Price Rs" type="number"/><input id="v_fuel" placeholder="Fuel"/><input id="v_trans" placeholder="Transmission"/><input id="v_km" placeholder="KM" type="number"/><button class="primary" onclick="addVehicle()">Add</button><button onclick="loadVeh()">Reload</button></div>
-<div id="veh"></div></section>
-<section id="s-td"><h3>Test Drives</h3><div class="row"><input id="td_lead" placeholder="lead_id"/><input id="td_veh" placeholder="vehicle_id"/><input id="td_when" placeholder="2026-09-20T10:00:00Z"/><button class="primary" onclick="addTD()">Schedule</button><button onclick="loadTD()">Reload</button></div><div id="td"></div></section>
-<section id="s-fu"><h3>Follow-ups</h3><div class="row"><input id="fu_msg" placeholder="message"/><input id="fu_when" placeholder="2026-09-20T10:00:00Z"/><button class="primary" onclick="addFU()">Add (needs lead? uses simulate phone)</button><button onclick="loadFU()">Reload</button></div><div id="fu"></div></section>
-<section id="s-bk"><h3>Bookings</h3><div class="row"><input id="bk_lead" placeholder="lead_id"/><input id="bk_veh" placeholder="vehicle_id"/><input id="bk_amt" placeholder="amount" type="number"/><button class="primary" onclick="addBK()">Book</button><button onclick="loadBK()">Reload</button></div><div id="bk"></div></section>
-<section id="s-neg"><h3>Negotiations</h3><div class="row"><input id="ng_lead" placeholder="lead_id"/><input id="ng_veh" placeholder="vehicle_id"/><input id="ng_co" placeholder="customer offer" type="number"/><input id="ng_so" placeholder="sales offer" type="number"/><input id="ng_fp" placeholder="final price" type="number"/><button class="primary" onclick="addNG()">Save</button><button onclick="loadNG()">Reload</button></div><div id="neg"></div></section>
-<section id="s-fin"><h3>Finance enquiries (info only, no gateway)</h3><div class="row"><button onclick="loadFIN()">Reload</button></div><div id="fin"></div></section>
-<section id="s-sell"><h3>Sell requests (valuation queue)</h3><div class="row"><button onclick="loadSELL()">Reload</button></div><div id="sell"></div></section>
-<section id="s-rev"><h3>Reviews & referrals</h3><div class="row"><input id="rv_bk" placeholder="booking_id"/><input id="rv_rate" placeholder="rating 1-5" type="number"/><input id="rv_txt" placeholder="review"/><button class="primary" onclick="addRV()">Save</button><button onclick="loadRV()">Reload</button></div><div id="rev"></div></section>
-<section id="s-team"><h3>Team (admin only)</h3><div class="row"><input id="u_email" placeholder="email"/><input id="u_pass" placeholder="password"/><select id="u_role"><option value="sales">sales</option><option value="admin">admin</option></select><button class="primary" onclick="addUser()">Create user</button></div><div class="row"><input id="as_lead" placeholder="lead_id"/><input id="as_user" placeholder="sales_user_id"/><button onclick="assign()">Assign salesperson</button></div><pre id="teamOut"></pre></section>
-<section id="s-sim"><h3>WhatsApp simulator (same state machine, no phone needed)</h3>
-<div class="row"><input id="sim_phone" value="9999999999"/><input id="sim_body" placeholder="hi / BUY / 4 lakh ..."/><button class="primary" onclick="sim()">Send</button></div>
-<pre id="simOut"></pre></section>
+<div class="toolbar"><input type="search" id="q_veh" placeholder="Search make / model…" oninput="renderVeh()"/>
+<select id="f_veh_status" onchange="renderVeh()"><option value="">All statuses</option><option>AVAILABLE</option><option>RESERVED</option><option>BOOKED</option><option>SOLD</option><option>DELIVERED</option><option>DRAFT</option></select>
+<button onclick="document.getElementById('vehForm').classList.toggle('hidden')">+ Add vehicle</button></div>
+<div id="vehForm" class="panel hidden"><h4>New vehicle</h4>
+<div class="row"><input id="v_make" placeholder="Make*"/><input id="v_model" placeholder="Model*"/><input id="v_year" placeholder="Year" type="number"/><input id="v_price" placeholder="Price Rs" type="number"/><input id="v_fuel" placeholder="Fuel"/><input id="v_trans" placeholder="Transmission"/><input id="v_km" placeholder="KM" type="number"/><input id="v_desc" placeholder="Description" style="min-width:240px"/><button class="primary" onclick="addVehicle()">Add</button></div></div>
+<div class="vgrid" id="veh"></div></section>
+<section id="s-td"><h3>Test drives</h3>
+<div class="panel"><h4>Schedule</h4><div class="row">
+<input id="td_lead" list="dl_leads" placeholder="Customer / phone…" style="min-width:200px"/>
+<input id="td_veh" list="dl_veh" placeholder="Vehicle…" style="min-width:200px"/>
+<input id="td_when" type="datetime-local"/><button class="primary" onclick="addTD()">Schedule</button></div></div>
+<div id="td"></div></section>
+<section id="s-fu"><h3>Follow-ups</h3>
+<div class="panel"><h4>New follow-up</h4><div class="row">
+<input id="fu_lead" list="dl_leads" placeholder="Customer / phone… (lead)"/>
+<input id="fu_type" placeholder="Type" value="general"/>
+<input id="fu_when" type="datetime-local"/><input id="fu_msg" placeholder="Message" style="min-width:260px"/>
+<button class="primary" onclick="addFU()">Add</button></div></div>
+<div id="fu"></div></section>
+<section id="s-bk"><h3>Bookings</h3>
+<div class="panel"><h4>New booking</h4><div class="row">
+<input id="bk_lead" list="dl_leads" placeholder="Customer / phone… (lead)"/>
+<input id="bk_veh" list="dl_veh" placeholder="Vehicle…"/>
+<input id="bk_amt" placeholder="Amount Rs" type="number"/><button class="primary" onclick="addBK()">Book</button></div></div>
+<div id="bk"></div></section>
+<section id="s-neg"><h3>Negotiations</h3>
+<div class="panel"><h4>New entry</h4><div class="row">
+<input id="ng_lead" list="dl_leads" placeholder="Customer / phone… (lead)"/>
+<input id="ng_veh" list="dl_veh" placeholder="Vehicle…"/>
+<input id="ng_co" placeholder="Customer offer" type="number"/><input id="ng_so" placeholder="Sales offer" type="number"/><input id="ng_fp" placeholder="Final price" type="number"/>
+<button class="primary" onclick="addNG()">Save</button></div></div>
+<div id="neg"></div></section>
+<section id="s-fin"><h3>Finance enquiries <span class="muted small">(information only — no payment gateway)</span></h3><div id="fin"></div></section>
+<section id="s-sell"><h3>Sell requests <span class="muted small">(valuation queue)</span></h3><div id="sell"></div></section>
+<section id="s-rev"><h3>Reviews & referrals</h3>
+<div class="panel"><h4>Record review</h4><div class="row">
+<input id="rv_bk" placeholder="Booking (customer / vehicle…)" list="dl_bk" style="min-width:220px"/>
+<input id="rv_rate" placeholder="Rating 1–5" type="number" min="1" max="5"/><input id="rv_txt" placeholder="Review" style="min-width:240px"/>
+<button class="primary" onclick="addRV()">Save</button></div></div>
+<div id="rev"></div></section>
+<section id="s-team"><h3>Team <span class="muted small">(admin only)</span></h3>
+<div class="panel"><h4>People</h4><div id="users"></div></div>
+<div class="panel"><h4>Add member</h4><div class="row">
+<input id="u_email" placeholder="email"/><input id="u_pass" placeholder="password" type="password"/>
+<select id="u_role"><option value="sales">sales</option><option value="admin">admin</option></select>
+<button class="primary" onclick="addUser()">Create</button></div></div></section>
+<section id="s-sim"><h3>WhatsApp simulator <span class="muted small">(same engine, no phone needed)</span></h3>
+<div class="row"><input id="sim_phone" value="9999999999"/><input id="sim_body" placeholder="hi / BUY / 4 lakh …" style="min-width:260px" onkeydown="if(event.key==='Enter')sim()"/><button class="primary" onclick="sim()">Send</button>
+<button onclick="document.getElementById('simThread').innerHTML=''">Clear</button></div>
+<div class="simthread" id="simThread"></div></section>
 </div>
 </main>
 </div>
+<datalist id="dl_leads"></datalist><datalist id="dl_veh"></datalist><datalist id="dl_bk"></datalist>
+<div id="toast"></div>
 <script src="app.js"></script>
 </body>
 </html>

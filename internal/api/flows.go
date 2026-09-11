@@ -56,7 +56,27 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"id": id, "email": in.Email, "role": in.Role})
 }
 
-// PATCH /api/leads/{id}/assign {sales_user_id} (admin only)
+// GET /api/users (admin only)
+func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
+	if !isAdmin(r) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+	rows, err := s.Pool.Query(r.Context(), `SELECT id::text,email,role,created_at FROM users ORDER BY created_at`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer rows.Close()
+	out := []any{}
+	for rows.Next() {
+		var id, email, role string
+		var ts any
+		_ = rows.Scan(&id, &email, &role, &ts)
+		out = append(out, map[string]any{"id": id, "email": email, "role": role, "created_at": ts})
+	}
+	writeJSON(w, out)
+}
 func (s *Server) assignLead(w http.ResponseWriter, r *http.Request) {
 	if !isAdmin(r) {
 		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)

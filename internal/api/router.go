@@ -81,6 +81,7 @@ func (s *Server) Router(webFS http.FileSystem) http.Handler {
 
 	// images (public read so WhatsApp/admin <img> works; upload stays authed)
 	mux.Handle("GET /images/", http.StripPrefix("/images/", http.FileServer(http.Dir(filepath.Join(s.DataDir, "images")))))
+	mux.Handle("GET /media/", http.StripPrefix("/media/", http.FileServer(http.Dir(filepath.Join(s.DataDir, "media")))))
 
 	// static admin
 	if webFS != nil {
@@ -167,6 +168,8 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.moreCars(w, r)
 	case p == "/api/users" && r.Method == "POST":
 		s.createUser(w, r)
+	case p == "/api/users" && r.Method == "GET":
+		s.listUsers(w, r)
 	case p == "/api/negotiations" && r.Method == "GET":
 		s.listNegotiations(w, r)
 	case p == "/api/negotiations" && r.Method == "POST":

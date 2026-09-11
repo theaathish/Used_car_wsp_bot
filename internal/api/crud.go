@@ -594,7 +594,7 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 		limit = 100
 	}
 	offset := qInt(r, "offset", 0)
-	rows, err := s.Pool.Query(r.Context(), `SELECT c.id::text,cu.name,cu.phone,c.status,c.updated_at,(SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id) FROM conversations c JOIN customers cu ON cu.id=c.customer_id ORDER BY c.updated_at DESC LIMIT $1 OFFSET $2`, limit, offset)
+	rows, err := s.Pool.Query(r.Context(), `SELECT c.id::text,cu.name,cu.phone,c.status,c.updated_at,(SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id),c.lead_id::text FROM conversations c JOIN customers cu ON cu.id=c.customer_id ORDER BY c.updated_at DESC LIMIT $1 OFFSET $2`, limit, offset)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
@@ -605,8 +605,13 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 		var id, name, phone, status string
 		var ts any
 		var n int
-		_ = rows.Scan(&id, &name, &phone, &status, &ts, &n)
-		out = append(out, map[string]any{"id": id, "name": name, "phone": phone, "status": status, "updated_at": ts, "messages": n})
+		var leadID *string
+		_ = rows.Scan(&id, &name, &phone, &status, &ts, &n, &leadID)
+		lid := ""
+		if leadID != nil {
+			lid = *leadID
+		}
+		out = append(out, map[string]any{"id": id, "name": name, "phone": phone, "status": status, "updated_at": ts, "messages": n, "lead_id": lid})
 	}
 	writeJSON(w, out)
 }
@@ -620,7 +625,7 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	if badUUID(w, conv) {
 		return
 	}
-	rows, err := s.Pool.Query(r.Context(), `SELECT direction,body,created_at FROM messages WHERE conversation_id=$1 ORDER BY created_at ASC LIMIT 200`, conv)
+	rows, err := s.Pool.Query(r.Context(), `SELECT direction,body,media_path,created_at FROM messages WHERE conversation_id=$1 ORDER BY created_at ASC LIMIT 200`, conv)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
@@ -628,10 +633,10 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []any{}
 	for rows.Next() {
-		var d, b string
+		var d, b, mp string
 		var ts any
-		_ = rows.Scan(&d, &b, &ts)
-		out = append(out, map[string]any{"direction": d, "body": b, "created_at": ts})
+		_ = rows.Scan(&d, &b, &mp, &ts)
+		out = append(out, map[string]any{"direction": d, "body": b, "media": mp, "created_at": ts})
 	}
 	writeJSON(w, out)
 }
