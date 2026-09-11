@@ -223,6 +223,35 @@ func TestTolerantIntents(t *testing.T) {
 	}
 }
 
+func TestResultsCommands(t *testing.T) {
+	data := map[string]string{}
+	st, _, _, _, patch := Next("BUY_RESULTS", "2", data)
+	if st != "BUY_RESULTS" || patch["select_idx"] != "2" {
+		t.Fatalf("selection: %s %+v", st, patch)
+	}
+	_, _, _, _, patch = Next("BUY_RESULTS", "car 3", data)
+	if patch["select_idx"] != "3" {
+		t.Fatalf("car N selection: %+v", patch)
+	}
+	st, _, _, _, patch = Next("BUY_RESULTS", "more photos", data)
+	if st != "BUY_RESULTS" || patch["more_photos"] != "1" {
+		t.Fatalf("more photos: %s %+v", st, patch)
+	}
+	st, _, _, _, patch = Next("BUY_RESULTS", "send all photos", data)
+	if patch["more_photos"] != "1" {
+		t.Fatalf("all photos: %s %+v", st, patch)
+	}
+	st, rep, _, _, patch := Next("BUY_RESULTS", "yes", data)
+	if patch["interest"] != "INTERESTED" {
+		t.Fatalf("yes confirm: %s %+v", st, patch)
+	}
+	_, _, _, _, patch = Next("BUY_BUDGET", "yes", data)
+	if patch["interest"] == "INTERESTED" {
+		t.Fatal("yes outside results must not confirm")
+	}
+	_ = rep
+}
+
 func TestSellValidation(t *testing.T) {
 	data := map[string]string{}
 	st, _, _, _, _ := Next("SELL_DETAILS", "not a car at all", data)

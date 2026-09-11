@@ -635,18 +635,42 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 	var photoJobs []photoJob
 
 	// BUY_RESULTS: first arrival runs matching; "more cars" pages forward;
-	// a bare number ("1") opens that car's details with photos.
+	// a bare number ("1") opens that car's details with ALL its photos;
+	// "more photos" resends the full set for the selected (or top) car.
 	if next == "BUY_RESULTS" {
 		page := atoi(data["page_num"])
 		if sel := atoi(patch["select_idx"]); sel > 0 {
 			if vd, ok := w.vehicleDetails(ctx, tx, data["match_ids"], sel); ok {
-				reply = vd.text
-				photoJobs = w.vehiclePhotoJobs(vd.photos, vd.caption, 3)
+				reply = vd.text + "\nLike it? Reply *YES* to confirm, *test drive* to book a visit, or *more cars* for others."
+				photoJobs = w.vehiclePhotoJobs(vd.photos, vd.caption, 5)
 				data["selected_vehicle"] = vd.id
 				m, _ := json.Marshal(data)
 				_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
 			} else {
-				reply = "That number isn't on the list. Reply a number 1–" + strconv.Itoa(len(strings.Split(data["match_ids"], ","))) + ", *more cars*, or *test drive*."
+				total := len(strings.Split(data["match_ids"], ","))
+				if data["match_ids"] == "" {
+					total = 0
+				}
+				reply = "That number isn't on the list. Reply a number 1–" + strconv.Itoa(total) + ", *more cars*, or *test drive*."
+			}
+		} else if patch["more_photos"] != "" {
+			vid := data["selected_vehicle"]
+			if vid == "" {
+				ids := strings.Split(data["match_ids"], ",")
+				if len(ids) > 0 {
+					vid = strings.TrimSpace(ids[0])
+				}
+			}
+			photos := w.vehiclePhotosTx(ctx, tx, vid, 6)
+			if len(photos) == 0 {
+				reply = "No photos uploaded for this car yet — our team will share them on call. Reply *YES* to confirm interest or *test drive* to visit."
+			} else {
+				cap_ := ""
+				if vd, ok := w.vehicleByID(ctx, tx, vid); ok {
+					cap_ = " of " + vd.caption
+				}
+				reply = "Here are all photos" + cap_ + ": Reply *YES* to confirm or *test drive* to book."
+				photoJobs = w.vehiclePhotoJobs(photos, strings.TrimPrefix(cap_, " of "), 6)
 			}
 		} else if moreCars {
 			page++
@@ -669,9 +693,9 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 				reply += "\nWe couldn't find an exact match. Would you like to see similar vehicles? Reply *more cars*."
 			} else {
 				if len(exact) == 0 {
-					reply += "\nNo exact match, but similar options (reply the number to see photos):\n"
+					reply += "\nNo exact match, but similar options (reply the number to see all photos):\n"
 				} else {
-					reply += "\nTop picks (reply the number to see photos):\n"
+					reply += "\nTop picks (reply the number to see all photos):\n"
 				}
 				first := combined
 				if len(first) > 3 {
@@ -685,15 +709,10 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 				data["match_ids"] = strings.Join(ids, ",")
 				m, _ := json.Marshal(data)
 				_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
-				// Buyer sees the cars: top 2 vehicles x first 2 photos (max 4).
-				for i, it := range first {
-					if i >= 2 {
-						break
-					}
-					photoJobs = append(photoJobs, w.vehiclePhotoJobs(w.vehiclePhotosTx(ctx, tx, it.id, 2), it.text, 2)...)
-					if len(photoJobs) >= 4 {
-						break
-					}
+				// One teaser photo of the top car; the full set comes when
+				// the buyer picks the number or asks for more photos.
+				if len(first) > 0 {
+					photoJobs = append(photoJobs, w.vehiclePhotoJobs(w.vehiclePhotosTx(ctx, tx, first[0].id, 1), first[0].text, 1)...)
 				}
 			}
 			_, _ = tx.Exec(ctx, `INSERT INTO requirements(lead_id,budget_min,budget_max,brand,model,fuel,transmission,year_min)

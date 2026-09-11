@@ -115,12 +115,16 @@ type vehicleDetail struct {
 
 // vehicleDetails resolves selection N (1-based) against the stored match list.
 func (w *Worker) vehicleDetails(ctx context.Context, tx pgx.Tx, matchIDs string, sel int) (vehicleDetail, bool) {
-	var vd vehicleDetail
 	ids := strings.Split(matchIDs, ",")
-	if sel < 1 || sel > len(ids) || ids[0] == "" {
-		return vd, false
+	if sel < 1 || sel > len(ids) || strings.TrimSpace(ids[0]) == "" {
+		return vehicleDetail{}, false
 	}
-	id := strings.TrimSpace(ids[sel-1])
+	return w.vehicleByID(ctx, tx, strings.TrimSpace(ids[sel-1]))
+}
+
+// vehicleByID loads one vehicle card.
+func (w *Worker) vehicleByID(ctx context.Context, tx pgx.Tx, id string) (vehicleDetail, bool) {
+	var vd vehicleDetail
 	var mk, md, fuel, trans, desc, status string
 	var year, price, km int
 	if err := tx.QueryRow(ctx, `SELECT make,model,year,price,fuel,transmission,km,COALESCE(description,''),status FROM vehicles WHERE id=$1`,
@@ -133,7 +137,7 @@ func (w *Worker) vehicleDetails(ctx context.Context, tx pgx.Tx, matchIDs string,
 		commaDesc(desc),
 		notAvailNote(status))
 	vd.caption = fmt.Sprintf("%s %s %d — Rs.%d", mk, md, year, price)
-	vd.photos = w.vehiclePhotosTx(ctx, tx, id, 3)
+	vd.photos = w.vehiclePhotosTx(ctx, tx, id, 6)
 	return vd, true
 }
 

@@ -346,6 +346,9 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case strings.Contains(b, "more") && strings.Contains(b, "car"):
 		patch["page"] = "next"
 		return "BUY_RESULTS", "Showing more cars for you...", "", "", patch
+	case (strings.Contains(b, "more photo") || strings.Contains(b, "all photo") || strings.Contains(b, "send photo") || b == "photos" || b == "photo") && state == "BUY_RESULTS":
+		patch["more_photos"] = "1"
+		return "BUY_RESULTS", "Sending all photos...", "", "", patch
 	case strings.Contains(b, "finance") || strings.Contains(b, "loan") || strings.Contains(b, "emi"):
 		return "FINANCE_INFO", "We offer loan assistance through partner banks. Reply with: loan amount, tenure (months), employment type and monthly income — e.g. *5 lakh, 60 months, salaried, 80000*. Our finance team will call you. (No payment is taken on WhatsApp.)", "", "FOLLOWUP", patch
 	case strings.Contains(b, "not interested") || strings.Contains(b, "not intrested") || strings.Contains(b, "no thanks") || strings.Contains(b, "drop"):
@@ -357,6 +360,9 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case strings.Contains(b, "interested") || strings.Contains(b, "intrested") || strings.Contains(b, "i like") || strings.Contains(b, "book") && strings.Contains(b, "test") == false && state == "BUY_RESULTS":
 		patch["interest"] = "INTERESTED"
 		return state, "Great! Our salesperson will call you shortly. You can also ask for a *test drive* with date/time.", "", "QUALIFIED", patch
+	case (b == "yes" || b == "yeah" || b == "yep" || b == "yes i like it" || strings.HasPrefix(b, "confirm")) && state == "BUY_RESULTS":
+		patch["interest"] = "INTERESTED"
+		return state, "Confirmed! Our salesperson will call you shortly to take it forward. You can also ask for a *test drive* with date/time.", "", "QUALIFIED", patch
 	case strings.Contains(b, "test") && strings.Contains(b, "drive"):
 		return "TESTDRIVE_ASK", "To book a test drive, reply with the car number or name plus day and time — e.g. *1, tomorrow 10am* or *Swift, Saturday 4pm*. Our team confirms the slot.", "", "TEST_DRIVE", patch
 	}
