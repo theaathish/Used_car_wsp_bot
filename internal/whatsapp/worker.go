@@ -631,39 +631,74 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 	if _, err := tx.Exec(ctx, `UPDATE conversations SET lead_id=$1, updated_at=now() WHERE id=$2`, leadID, convID); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply); err != nil {
-		return "", err
-	}
 
-	// BUY_RESULTS: first arrival runs matching; "more cars" pages forward.
+	var photoJobs []photoJob
+
+	// BUY_RESULTS: first arrival runs matching; "more cars" pages forward;
+	// a bare number ("1") opens that car's details with photos.
 	if next == "BUY_RESULTS" {
 		page := atoi(data["page_num"])
-		if moreCars {
+		if sel := atoi(patch["select_idx"]); sel > 0 {
+			if vd, ok := w.vehicleDetails(ctx, tx, data["match_ids"], sel); ok {
+				reply = vd.text
+				photoJobs = w.vehiclePhotoJobs(vd.photos, vd.caption, 3)
+				data["selected_vehicle"] = vd.id
+				m, _ := json.Marshal(data)
+				_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
+			} else {
+				reply = "That number isn't on the list. Reply a number 1–" + strconv.Itoa(len(strings.Split(data["match_ids"], ","))) + ", *more cars*, or *test drive*."
+			}
+		} else if moreCars {
 			page++
 			data["page_num"] = strconv.Itoa(page)
 			m, _ := json.Marshal(data)
 			_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
-			exact, similar := runMatchingTx(ctx, tx, leadID, data)
-			_ = exact
-			extra := pageSlice(similar, page)
-			if len(extra) == 0 {
+			items := w.matchItemsTx(ctx, tx, data["match_ids"], page*3, 3)
+			if len(items) == 0 {
 				reply = "That's all matching cars for now. Our team will call you with fresh arrivals."
 			} else {
-				reply = "More options:\n" + strings.Join(extra, "\n")
+				reply = "More options (reply the number to see photos):\n" + strings.Join(numbered(items, page*3+1), "\n")
 			}
 		} else if state != "BUY_RESULTS" {
 			exact, similar := runMatchingTx(ctx, tx, leadID, data)
-			if len(exact) == 0 && len(similar) == 0 {
+			combined := append(append([]matchItem{}, exact...), similar...)
+			if len(combined) > 12 {
+				combined = combined[:12]
+			}
+			if len(combined) == 0 {
 				reply += "\nWe couldn't find an exact match. Would you like to see similar vehicles? Reply *more cars*."
-			} else if len(exact) == 0 {
-				reply += "\nNo exact match, but similar options:\n" + strings.Join(pageSlice(similar, 0), "\n")
 			} else {
-				reply += "\nTop picks:\n" + strings.Join(pageSlice(exact, 0), "\n")
+				if len(exact) == 0 {
+					reply += "\nNo exact match, but similar options (reply the number to see photos):\n"
+				} else {
+					reply += "\nTop picks (reply the number to see photos):\n"
+				}
+				first := combined
+				if len(first) > 3 {
+					first = first[:3]
+				}
+				reply += strings.Join(numbered(first, 1), "\n")
+				ids := make([]string, 0, len(combined))
+				for _, it := range combined {
+					ids = append(ids, it.id)
+				}
+				data["match_ids"] = strings.Join(ids, ",")
+				m, _ := json.Marshal(data)
+				_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
+				// Buyer sees the cars: top 2 vehicles x first 2 photos (max 4).
+				for i, it := range first {
+					if i >= 2 {
+						break
+					}
+					photoJobs = append(photoJobs, w.vehiclePhotoJobs(w.vehiclePhotosTx(ctx, tx, it.id, 2), it.text, 2)...)
+					if len(photoJobs) >= 4 {
+						break
+					}
+				}
 			}
 			_, _ = tx.Exec(ctx, `INSERT INTO requirements(lead_id,budget_min,budget_max,brand,model,fuel,transmission,year_min)
 				VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
 				leadID, atoi(data["budget_min"]), atoi(data["budget_max"]), data["brand"], data["model"], data["fuel"], data["transmission"], atoi(data["year_min"]))
-			_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
 			_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message) VALUES($1,$2,'post_match',now()+interval '24 hours','Follow up on matched cars') ON CONFLICT DO NOTHING`, custID, leadID)
 		}
 	}
@@ -683,14 +718,37 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			SELECT $1,0,0,'','', 'NEW' WHERE NOT EXISTS (SELECT 1 FROM finance_requests WHERE lead_id=$1)`, leadID)
 	}
 
+	// Test-drive details arrived: book a real slot when possible, otherwise
+	// reopen the question. Either way the generic sales-followup is skipped.
+	tdHandled := false
+	if state == "TESTDRIVE_ASK" && next == "DONE" {
+		tdHandled = true
+		if tdReply, reopened := w.bookTestDriveTx(ctx, tx, leadID, custID, body, data); reopened {
+			next = "TESTDRIVE_ASK"
+			merged2, _ := json.Marshal(dataWithPrev(data, "TESTDRIVE_ASK"))
+			_, _ = tx.Exec(ctx, `UPDATE leads SET state='TESTDRIVE_ASK',state_data=$1,updated_at=now() WHERE id=$2`, string(merged2), leadID)
+			reply = tdReply
+		} else {
+			reply = tdReply
+		}
+	}
+
 	// Test-drive request without a firm slot -> sales followup
-	if tr, ok := data["testdrive_raw"]; ok && tr != "" && next == "DONE" {
+	if tr, ok := data["testdrive_raw"]; ok && tr != "" && next == "DONE" && !tdHandled {
 		_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message)
 			VALUES($1,$2,'testdrive_request',now()+interval '1 hour',$3) ON CONFLICT DO NOTHING`, custID, leadID, "Test drive request: "+tr)
 	}
 
+	if reply != "" {
+		if _, err := tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply); err != nil {
+			return "", err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", err
+	}
+	if len(photoJobs) > 0 {
+		go w.sendPhotos(phone, photoJobs)
 	}
 	return reply, nil
 }
@@ -838,9 +896,36 @@ func pageSlice(in []string, page int) []string {
 	return in[start:end]
 }
 
+// matchItem is a scored vehicle with display text (numbering added at send
+// time so paging and selection stay consistent).
+type matchItem struct {
+	id   string
+	text string
+}
+
+func numbered(items []matchItem, start int) []string {
+	out := make([]string, 0, len(items))
+	for i, it := range items {
+		out = append(out, fmt.Sprintf("%d. %s", start+i, it.text))
+	}
+	return out
+}
+
+func pageItems(in []matchItem, page int) []matchItem {
+	start := page * 3
+	if start >= len(in) {
+		return nil
+	}
+	end := start + 3
+	if end > len(in) {
+		end = len(in)
+	}
+	return in[start:end]
+}
+
 // runMatchingTx returns (exact, similar). Exact = in budget + all stated
 // filters; similar = same brand OR budget-adjacent, excluding exact picks.
-func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[string]string) (exact, similar []string) {
+func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[string]string) (exact, similar []matchItem) {
 	rows, err := tx.Query(ctx, `SELECT id::text, make, model, year, price, fuel, transmission, km FROM vehicles WHERE status='AVAILABLE' LIMIT 100`)
 	if err != nil {
 		return nil, nil
@@ -910,7 +995,6 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		return true, score
 	}
 	exactIDs := map[string]bool{}
-	n := 0
 	for _, c := range all {
 		ok, score := isExact(c)
 		if !ok {
@@ -918,11 +1002,9 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		}
 		_, _ = tx.Exec(ctx, `INSERT INTO vehicle_matches(lead_id,vehicle_id,score) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, leadID, c.id, score)
 		exactIDs[c.id] = true
-		n++
-		exact = append(exact, fmt.Sprintf("%d. %s %s %d — Rs.%d (%s/%s)", n, c.make, c.model, c.year, c.price, c.fuel, c.trans))
+		exact = append(exact, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — Rs.%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
 	}
 	// Similar: same brand, or within ±25% of budget, or same fuel — excluding exact.
-	m := 0
 	for _, c := range all {
 		if exactIDs[c.id] {
 			continue
@@ -940,9 +1022,8 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		if !sim {
 			continue
 		}
-		m++
-		similar = append(similar, fmt.Sprintf("%d. %s %s %d — Rs.%d (%s/%s)", m, c.make, c.model, c.year, c.price, c.fuel, c.trans))
-		if m >= 9 {
+		similar = append(similar, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — Rs.%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
+		if len(similar) >= 9 {
 			break
 		}
 	}

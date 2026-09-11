@@ -144,7 +144,16 @@ func ExtractAll(body string) map[string]string {
 	return out
 }
 
-// SplitBrandModel splits "BMW X1" -> ("BMW","X1"). Single word -> brand only.
+// parseSelection matches "1".."9" (also "car 2", "option 3") for picking a
+// numbered vehicle from the match list. Returns 0 when not a selection.
+func parseSelection(body string) int {
+	m := regexp.MustCompile(`(?i)^\s*(?:option|car|number|no\.?)?\s*([1-9])\s*$`).FindStringSubmatch(body)
+	if len(m) != 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
 func SplitBrandModel(body string) (string, string) {
 	parts := strings.Fields(strings.TrimSpace(body))
 	if len(parts) == 0 {
@@ -338,7 +347,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		patch["interest"] = "INTERESTED"
 		return state, "Great! Our salesperson will call you shortly. You can also ask for a *test drive* with date/time.", "", "QUALIFIED", patch
 	case strings.Contains(b, "test") && strings.Contains(b, "drive"):
-		return "TESTDRIVE_ASK", "To book a test drive, reply with vehicle + preferred date/time — e.g. *Swift, tomorrow 10am*. Our team will confirm the slot.", "", "TEST_DRIVE", patch
+		return "TESTDRIVE_ASK", "To book a test drive, reply with the car number or name plus day and time — e.g. *1, tomorrow 10am* or *Swift, Saturday 4pm*. Our team confirms the slot.", "", "TEST_DRIVE", patch
 	}
 
 	switch state {
@@ -502,6 +511,9 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		return "BUY_RESULTS", "Thanks! Let me find matching cars for you...", "BUY", "QUALIFIED", patch
 	case "BUY_RESULTS":
+		if n := parseSelection(body); n > 0 {
+			patch["select_idx"] = strconv.Itoa(n)
+		}
 		return "BUY_RESULTS", "Reply *more cars* for additional options, *test drive* to book, *finance* for loan help, or *interested* and our team will call you.", "BUY", "QUALIFIED", patch
 	case "FINANCE_INFO":
 		patch["finance_raw"] = strings.TrimSpace(body)

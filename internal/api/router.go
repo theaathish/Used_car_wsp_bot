@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -288,6 +289,7 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		reply, err := s.WA.HandleInbound(r.Context(), in.Phone, in.Name, in.Body)
 		if err != nil {
+			log.Printf("[api] simulate %s %q: %v", in.Phone, in.Body, err)
 			http.Error(w, `{"error":"handler failed"}`, http.StatusInternalServerError)
 			return
 		}

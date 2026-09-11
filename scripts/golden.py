@@ -56,14 +56,19 @@ for m in ["hi", "exchange", "Alto 2015 70000km", "Baleno under 8 lakh"]:
 l = lead_of(p)
 check("GOLDEN-003 exchange", l["intent"] == "EXCHANGE" and l["state"] == "DONE", (l["state"], l["intent"]))
 
-# GOLDEN-004 TEST DRIVE request -> sales followup
+# GOLDEN-004 TEST DRIVE request -> real booking when parseable, else sales followup
 p = P("04")
-for m in ["hi", "buy", "5 lakh", "Maruti", "Swift", "Petrol", "Manual", "2019"]:
+gm = "G" + RUN[-4:]
+s, gv = api("POST", "/api/vehicles", {"make": "Gold", "model": gm, "year": 2022, "price": 600000})
+for m in ["hi", "buy", "5-8 lakh", "Gold", gm, "any", "any", "2020"]:
     sim(p, m)
 r = sim(p, "test drive")
-r = sim(p, "Swift tomorrow 10am")
+r = sim(p, f"{gm} tomorrow 10am")
+s, tds = api("GET", "/api/test-drives")
 s, fus = api("GET", "/api/followups")
-check("GOLDEN-004 td-request", "test drive" in r.lower() and any("Test drive request" in (f.get("message") or "") for f in fus), r[:70])
+mine_td = [t for t in tds if gm in t.get("vehicle", "")]
+mine_fu = [f for f in fus if "Test drive request" in (f.get("message") or "")]
+check("GOLDEN-004 td-request", ("test drive" in r.lower() or "confirmed" in r.lower()) and (mine_td or mine_fu), r[:70])
 
 # GOLDEN-005 FOLLOW-UP thinking -> interested
 p = P("05")

@@ -82,6 +82,10 @@ drill [ ] 24h (preferably 48h) soak [ ] disk-full drill [ ] log rotation.
   status PATCH for test drives/finance; user role changes with
   last-admin guards; booking CANCELLED releases the vehicle.
 - White admin theme.
+- Buyer media: match results arrive with car photos (top 2 cars x 2
+  photos), "1"/"2" opens details + photos, test-drive books for real
+  from chat ("1, tomorrow 10am") with slot-taken recovery. Speculative
+  inserts use SAVEPOINTs so a taken slot can't poison the transaction.
 
 ## Manual checklist (before production)
 
