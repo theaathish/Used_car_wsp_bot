@@ -414,7 +414,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		return nxt, "Noted budget. "+promptFor(nxt), "BUY", "QUALIFIED", patch
 	case "BUY_BRAND":
 		if b == "" || b == "any" || b == "no" {
-			patch["brand"] = ""
+			patch["brand"] = "ANY"
 		} else if br, mo := SplitBrandModel(body); mo != "" {
 			patch["brand"] = br // "BMW X1" in brand step fills both
 			patch["model"] = mo
@@ -439,7 +439,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			patch[k] = v
 		}
 		if b == "" || b == "any" || b == "no" {
-			patch["model"] = ""
+			patch["model"] = "ANY"
 		} else if rem := stripKnown(body); rem != "" {
 			patch["model"] = rem
 		} else {
@@ -459,6 +459,8 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		if f := findFuel(body); f != "" {
 			patch["fuel"] = f
+		} else if strings.Contains(b, "any") || b == "" || b == "no" || b == "skip" {
+			patch["fuel"] = "ANY"
 		} else if findTrans(body) != "" || hasBudget(body) {
 			return "BUY_FUEL", "Saved that. Still need fuel — *Petrol / Diesel / CNG / Electric / Any*?", "BUY", "QUALIFIED", patch
 		} else if !strings.Contains(b, "any") && b != "" {
@@ -478,6 +480,8 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		if tr := findTrans(body); tr != "" {
 			patch["transmission"] = tr
+		} else if strings.Contains(b, "any") || b == "" || b == "no" || b == "skip" {
+			patch["transmission"] = "ANY"
 		} else if findFuel(body) != "" || hasBudget(body) {
 			return "BUY_TRANS", "Saved that. Still need transmission — *Manual / Automatic / Any*?", "BUY", "QUALIFIED", patch
 		} else if !strings.Contains(b, "any") && b != "" {

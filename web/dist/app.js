@@ -59,7 +59,7 @@ function login() {
 function logout() { localStorage.removeItem('token'); location.reload(); }
 
 /* ---------- nav ---------- */
-const NAV = [['dash', 'Dashboard'], ['wa', 'WhatsApp'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
+const NAV = [['dash', 'Dashboard'], ['wa', 'WhatsApp'], ['cust', 'Customers'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
   ['td', 'Test Drives'], ['fu', 'Follow-ups'], ['bk', 'Bookings'], ['neg', 'Negotiations'], ['fin', 'Finance'],
   ['sell', 'Sell Requests'], ['rev', 'Reviews'], ['team', 'Team'], ['sim', 'Simulator']];
 function buildNav() {
@@ -87,7 +87,7 @@ async function boot() {
   ['NEW', 'CONTACTED', 'QUALIFIED', 'TEST_DRIVE', 'FOLLOWUP', 'BOOKED', 'CONVERTED', 'LOST'].forEach(function (s) {
     const o = document.createElement('option'); o.textContent = s; st.appendChild(o);
   });
-  dash(); waStatus(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadFU(); loadBK(); loadNG(); loadFIN(); loadSELL(); loadRV(); loadUsers();
+  dash(); waStatus(); loadCust(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadFU(); loadBK(); loadNG(); loadFIN(); loadSELL(); loadRV(); loadUsers();
 }
 async function reloadLookups() {
   const l = await api('GET', '/api/leads?limit=200'); LEADS = l.ok ? l.data : [];
@@ -196,8 +196,33 @@ async function loadLeads() {
         '<button class="small" onclick="setInterest(\'' + o.id + '\',\'INTERESTED\')">Interested</button> ' +
         '<button class="small" onclick="setInterest(\'' + o.id + '\',\'THINKING\')">Thinking</button> ' +
         '<button class="small" onclick="setInterest(\'' + o.id + '\',\'NOT_INTERESTED\')">Lost</button></td>' +
-        '<td><button class="small" onclick="openLeadChat(\'' + o.id + '\')">Chat</button></td></tr>';
+        '<td><button class="small" onclick="openLeadChat(\'' + o.id + '\')">Chat</button>' +
+        (ME.role === 'admin' ? ' <button class="small danger" onclick="delLead(\'' + o.id + '\')">Delete</button>' : '') + '</td></tr>';
     }).join('') + '</table>' : '<div class="empty">No leads yet — they appear when someone messages on WhatsApp.</div>';
+}
+/* ---------- customers ---------- */
+async function loadCust() {
+  const r = await api('GET', '/api/customers'); if (!r.ok) return;
+  const q = val('q_cust').toLowerCase();
+  const rows = r.data.filter(function (o) { return !q || (o.name + ' ' + o.phone).toLowerCase().includes(q); });
+  document.getElementById('cust').innerHTML = rows.length ? '<table><tr><th>Name</th><th>Phone</th><th>Source</th><th>Since</th><th></th></tr>' +
+    rows.map(function (o) {
+      return '<tr><td><b>' + esc(o.name) + '</b><br/>' + sid(o.id) + '</td><td>' + esc(o.phone) + '</td>' +
+        '<td class="muted small">' + esc(o.source) + '</td><td class="muted small">' + fmtDate(o.created_at) + '</td>' +
+        '<td><button class="small" onclick="renameCust(\'' + o.id + '\',\'' + esc(o.name).replace(/'/g, "\\'") + '\')">Rename</button> ' +
+        '<button class="small danger" onclick="delCust(\'' + o.id + '\',\'' + esc(o.name) + '\')">Delete</button></td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No customers yet.</div>';
+}
+async function renameCust(id, oldName) {
+  const v = prompt('Customer name:', oldName || '');
+  if (!v) return;
+  const r = await api('PATCH', '/api/customers/' + id, {name: v});
+  if (r.ok) { toast('Renamed'); loadCust(); }
+}
+async function delCust(id, name) {
+  if (!confirm('Delete customer "' + name + '" and all their leads, chats and bookings?')) return;
+  const r = await api('DELETE', '/api/customers/' + id);
+  if (r.ok) { toast('Deleted'); loadCust(); }
 }
 async function assignLead(id, userId) {
   if (!userId) return;
@@ -244,7 +269,7 @@ async function renderThread(quiet) {
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
   box.innerHTML = msgs.map(function (m) {
     let inner = esc(m.body);
-    if (m.media) inner += '<br/><a href="/' + esc(m.media) + '" target="_blank"><img src="/' + esc(m.media) + '" loading="lazy"/></a>';
+    if (m.media) inner += '<br/><a href="/' + esc(m.media) + '" target="_blank"><img src="/' + esc(m.media) + '" loading="lazy" onerror="this.closest(\'a\').outerHTML=\'<span class=&quot;muted small&quot;>[photo unavailable — file was lost before backup]</span>\'"/></a>';
     return '<div class="bub ' + (m.direction === 'in' ? 'in' : 'out') + '">' + inner + '<span class="ts">' + fmtDate(m.created_at) + '</span></div>';
   }).join('');
   if (!quiet || nearBottom) box.scrollTop = box.scrollHeight;
@@ -277,12 +302,13 @@ function renderVeh() {
     if (o.status === 'AVAILABLE') acts = '<button class="small" onclick="vehStatus(\'' + o.id + '\',\'RESERVED\')">Reserve</button> <button class="small" onclick="vehStatus(\'' + o.id + '\',\'SOLD\')">Mark sold</button>';
     if (o.status === 'RESERVED') acts = '<button class="small" onclick="vehStatus(\'' + o.id + '\',\'AVAILABLE\')">Release</button> <button class="small" onclick="vehStatus(\'' + o.id + '\',\'SOLD\')">Mark sold</button>';
     if (o.status === 'BOOKED') acts = '<button class="small" onclick="vehStatus(\'' + o.id + '\',\'DELIVERED\')">Delivered</button> <button class="small" onclick="vehStatus(\'' + o.id + '\',\'AVAILABLE\')">Release</button>';
+    const delBtn = ME.role === 'admin' ? ' <button class="small danger" onclick="delVeh(\'' + o.id + '\',\'' + esc(o.make + ' ' + o.model).replace(/'/g, "\\'") + '\')">Delete</button>' : '';
     return '<div class="vcard">' + (imgs.length ? '<img src="' + esc(imgs[0]) + '" loading="lazy"/>' : '') +
       '<div class="b"><div class="t">' + esc(o.make) + ' ' + esc(o.model) + ' ' + esc(o.year) + '</div>' +
       '<div class="spec">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + Number(o.km || 0).toLocaleString('en-IN') + ' km</div>' +
       '<div class="price">' + fmtMoney(o.price) + '</div>' + pill(o.status) + ' ' + sid(o.id) +
-      '<div class="thumbs">' + imgs.map(function (p) { return '<a href="' + esc(p) + '" target="_blank"><img src="' + esc(p) + '" loading="lazy"/></a>'; }).join('') + '</div>' +
-      '<div class="acts">' + acts + ' <label class="small" style="cursor:pointer;border:1px solid #333a47;border-radius:8px;padding:4px 8px">+ Photos<input type="file" accept="image/*" multiple style="display:none" onchange="uploadVeh(\'' + o.id + '\',this)"/></label></div>' +
+      '<div class="thumbs">' + imgs.map(function (p) { return '<a href="' + esc(p) + '" target="_blank"><img src="' + esc(p) + '" loading="lazy" onerror="this.closest(\'a\').remove()"/></a>'; }).join('') + '</div>' +
+      '<div class="acts">' + acts + delBtn + ' <label class="small" style="cursor:pointer;border:1px solid #c4cede;border-radius:8px;padding:4px 8px">+ Photos<input type="file" accept="image/*" multiple style="display:none" onchange="uploadVeh(\'' + o.id + '\',this)"/></label></div>' +
       '</div></div>';
   }).join('') : '<div class="empty">No vehicles — add your first car above.</div>';
 }
@@ -319,8 +345,11 @@ async function uploadVeh(id, input) {
 function dtLocal(id) { const v = val(id); if (!v) return ''; return new Date(v).toISOString(); }
 async function loadTD() {
   const r = await api('GET', '/api/test-drives'); if (!r.ok) return;
-  document.getElementById('td').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Vehicle</th><th>When</th><th>Status</th></tr>' +
-    r.data.map(function (o) { return '<tr><td>' + esc(o.phone) + '</td><td>' + esc(o.vehicle) + '</td><td>' + fmtDate(o.scheduled_at) + '</td><td>' + pill(o.status) + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">No test drives scheduled.</div>';
+  document.getElementById('td').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Vehicle</th><th>When</th><th>Status</th><th></th></tr>' +
+    r.data.map(function (o) {
+      const act = o.status === 'SCHEDULED' ? '<button class="small" onclick="tdStatus(\'' + o.id + '\',\'COMPLETED\')">Done</button> <button class="small" onclick="tdStatus(\'' + o.id + '\',\'CANCELLED\')">Cancel</button> <button class="small" onclick="tdStatus(\'' + o.id + '\',\'NO_SHOW\')">No-show</button>' : '';
+      return '<tr><td>' + esc(o.phone) + '</td><td>' + esc(o.vehicle) + '</td><td>' + fmtDate(o.scheduled_at) + '</td><td>' + pill(o.status) + '</td><td>' + act + '</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No test drives scheduled.</div>';
 }
 async function addTD() {
   const lead = resolveId('td_lead'), veh = resolveId('td_veh'), when = dtLocal('td_when');
@@ -332,7 +361,9 @@ async function loadFU() {
   const r = await api('GET', '/api/followups'); if (!r.ok) return;
   document.getElementById('fu').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Type</th><th>When</th><th>Status</th><th>Message</th><th></th></tr>' +
     r.data.map(function (o) {
-      const act = o.status === 'pending' ? '<button class="small" onclick="fuStatus(\'' + o.id + '\',\'cancelled\')">Cancel</button>' : '';
+      let act = '';
+      if (o.status === 'pending') act = '<button class="small" onclick="fuStatus(\'' + o.id + '\',\'cancelled\')">Cancel</button> ';
+      if (ME.role === 'admin') act += '<button class="small danger" onclick="delFU(\'' + o.id + '\')">Delete</button>';
       return '<tr><td>' + esc(o.phone) + '</td><td>' + esc(o.type) + '</td><td>' + fmtDate(o.scheduled_at) + '</td><td>' + pill(o.status) + '</td><td>' + esc(o.message) + '</td><td>' + act + '</td></tr>';
     }).join('') + '</table>' : '<div class="empty">No follow-ups.</div>';
 }
@@ -383,18 +414,29 @@ async function addNG() {
 }
 async function loadFIN() {
   const r = await api('GET', '/api/finance'); if (!r.ok) return;
-  document.getElementById('fin').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Loan</th><th>Tenure</th><th>Employment</th><th>Income</th><th>Status</th></tr>' +
-    r.data.map(function (o) { return '<tr><td>' + esc(o.phone) + '</td><td>' + fmtMoney(o.loan_amount) + '</td><td>' + esc(o.tenure_months) + ' mo</td><td>' + esc(o.employment) + '</td><td>' + fmtMoney(o.income) + '</td><td>' + pill(o.status) + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">No finance enquiries.</div>';
+  document.getElementById('fin').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Loan</th><th>Tenure</th><th>Employment</th><th>Income</th><th>Status</th><th></th></tr>' +
+    r.data.map(function (o) {
+      const act = (o.status === 'NEW' || o.status === 'CONTACTED') ? '<button class="small" onclick="finStatus(\'' + o.id + '\',\'APPROVED\')">Approve</button> <button class="small" onclick="finStatus(\'' + o.id + '\',\'REJECTED\')">Reject</button>' : '';
+      return '<tr><td>' + esc(o.phone) + '</td><td>' + fmtMoney(o.loan_amount) + '</td><td>' + esc(o.tenure_months) + ' mo</td><td>' + esc(o.employment) + '</td><td>' + fmtMoney(o.income) + '</td><td>' + pill(o.status) + '</td><td>' + act + '</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No finance enquiries.</div>';
 }
 async function loadSELL() {
   const r = await api('GET', '/api/sell-requests'); if (!r.ok) return;
-  document.getElementById('sell').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Car</th><th>Year</th><th>KM</th><th>Reg</th><th>Photos</th><th>Status</th></tr>' +
-    r.data.map(function (o) { return '<tr><td>' + esc(o.phone) + '<br/>' + sid(o.id) + '</td><td><b>' + esc(o.brand) + ' ' + esc(o.model) + '</b><br/><span class="muted small">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + esc(o.condition) + ' · ' + esc(o.location) + '</span></td><td>' + esc(o.year) + '</td><td>' + Number(o.km || 0).toLocaleString('en-IN') + '</td><td class="small">' + esc(o.registration) + '</td><td>' + esc(o.photo_count) + '</td><td>' + pill(o.status) + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">No sell requests.</div>';
+  document.getElementById('sell').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Car</th><th>Year</th><th>KM</th><th>Reg</th><th>Photos</th><th>Status</th><th></th></tr>' +
+    r.data.map(function (o) {
+      let act = '';
+      if (o.status === 'VALUATION_PENDING') act = '<button class="small primary" onclick="sellAccept(\'' + o.id + '\')">Accept</button> <button class="small danger" onclick="sellReject(\'' + o.id + '\')">Reject</button>';
+      else act = '<button class="small" onclick="sellReopen(\'' + o.id + '\')">Reopen</button>';
+      return '<tr><td>' + esc(o.phone) + '<br/>' + sid(o.id) + '</td><td><b>' + esc(o.brand) + ' ' + esc(o.model) + '</b><br/><span class="muted small">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + esc(o.condition) + ' · ' + esc(o.location) + '</span></td><td>' + esc(o.year) + '</td><td>' + Number(o.km || 0).toLocaleString('en-IN') + '</td><td class="small">' + esc(o.registration) + '</td><td>' + esc(o.photo_count) + '</td><td>' + pill(o.status) + '</td><td>' + act + '</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No sell requests.</div>';
 }
 async function loadRV() {
   const r = await api('GET', '/api/reviews'); if (!r.ok) return;
-  document.getElementById('rev').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Rating</th><th>Review</th></tr>' +
-    r.data.map(function (o) { return '<tr><td>' + esc(o.phone) + '</td><td>' + '★'.repeat(+o.rating || 0) + '</td><td>' + esc(o.review) + '</td></tr>'; }).join('') + '</table>' : '<div class="empty">No reviews yet.</div>';
+  document.getElementById('rev').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Rating</th><th>Review</th><th></th></tr>' +
+    r.data.map(function (o) {
+      const del = ME.role === 'admin' ? '<button class="small danger" onclick="delRV(\'' + o.id + '\')">Delete</button>' : '';
+      return '<tr><td>' + esc(o.phone) + '</td><td>' + '★'.repeat(+o.rating || 0) + '</td><td>' + esc(o.review) + '</td><td>' + del + '</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No reviews yet.</div>';
 }
 async function addRV() {
   const bk = resolveId('rv_bk'); if (!bk) return;
@@ -407,8 +449,14 @@ async function loadUsers() {
   if (ME.role !== 'admin') return;
   const r = await api('GET', '/api/users'); if (!r.ok) return;
   USERS = r.data;
-  document.getElementById('users').innerHTML = '<table><tr><th>Email</th><th>Role</th><th>Since</th></tr>' +
-    USERS.map(function (u) { return '<tr><td>' + esc(u.email) + '</td><td>' + pill(u.role) + '</td><td class="muted small">' + fmtDate(u.created_at) + '</td></tr>'; }).join('') + '</table>';
+  document.getElementById('users').innerHTML = '<table><tr><th>Email</th><th>Role</th><th>Since</th><th></th></tr>' +
+    USERS.map(function (u) {
+      const own = ME.email === u.email;
+      const acts = own ? '<span class="muted small">you</span>' :
+        '<select class="small" onchange="userRole(\'' + u.id + '\',this.value)"><option value="">Set role…</option><option value="sales">sales</option><option value="admin">admin</option></select> ' +
+        '<button class="small danger" onclick="delUser(\'' + u.id + '\',\'' + esc(u.email) + '\')">Remove</button>';
+      return '<tr><td>' + esc(u.email) + '</td><td>' + pill(u.role) + '</td><td class="muted small">' + fmtDate(u.created_at) + '</td><td>' + acts + '</td></tr>';
+    }).join('') + '</table>';
 }
 async function addUser() {
   const r = await api('POST', '/api/users', {email: val('u_email'), password: document.getElementById('u_pass').value, role: val('u_role')});
@@ -427,4 +475,58 @@ async function sim() {
   box.value = ''; simBubble(body, 'in');
   const r = await api('POST', '/api/whatsapp/simulate', {phone: phone, body: body});
   simBubble((r.data && r.data.reply) || '(no reply)', 'out');
+}
+
+/* ---------- deletes & status actions ---------- */
+async function delLead(id) {
+  if (!confirm('Delete this lead and its test drives, follow-ups, bookings?')) return;
+  const r = await api('DELETE', '/api/leads/' + id);
+  if (r.ok) { toast('Lead deleted'); loadLeads(); }
+}
+async function delVeh(id, label) {
+  if (!confirm('Delete vehicle "' + label + '"?')) return;
+  const r = await api('DELETE', '/api/vehicles/' + id);
+  if (r.ok) { toast('Vehicle deleted'); loadVeh(); }
+}
+async function tdStatus(id, st) {
+  const r = await api('PATCH', '/api/test-drives/' + id, {status: st});
+  if (r.ok) { toast('Test drive ' + st); loadTD(); }
+}
+async function finStatus(id, st) {
+  const r = await api('PATCH', '/api/finance/' + id, {status: st});
+  if (r.ok) { toast('Finance ' + st); loadFIN(); }
+}
+async function delFU(id) {
+  if (!confirm('Delete this follow-up?')) return;
+  const r = await api('DELETE', '/api/followups/' + id);
+  if (r.ok) { toast('Deleted'); loadFU(); }
+}
+async function delRV(id) {
+  if (!confirm('Delete this review?')) return;
+  const r = await api('DELETE', '/api/reviews/' + id);
+  if (r.ok) { toast('Deleted'); loadRV(); }
+}
+async function userRole(id, role) {
+  const r = await api('PATCH', '/api/users/' + id, {role: role});
+  if (r.ok) { toast('Role updated'); loadUsers(); }
+}
+async function delUser(id, email) {
+  if (!confirm('Remove team member "' + email + '"?')) return;
+  const r = await api('DELETE', '/api/users/' + id);
+  if (r.ok) { toast('Removed'); loadUsers(); }
+}
+async function sellAccept(id) {
+  const v = prompt('Accept valuation — enter agreed price in Rs:', '0');
+  if (v === null) return;
+  const r = await api('POST', '/api/sell-requests/' + id + '/accept', {price: +v || 0});
+  if (r.ok) { toast('Accepted — car added to inventory'); loadSELL(); loadVeh(); }
+}
+async function sellReject(id) {
+  if (!confirm('Reject this sell request?')) return;
+  const r = await api('POST', '/api/sell-requests/' + id + '/reject', {});
+  if (r.ok) { toast('Rejected'); loadSELL(); }
+}
+async function sellReopen(id) {
+  const r = await api('POST', '/api/sell-requests/' + id + '/reopen', {});
+  if (r.ok) { toast('Reopened'); loadSELL(); }
 }

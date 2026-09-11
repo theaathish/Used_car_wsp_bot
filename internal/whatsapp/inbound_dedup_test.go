@@ -21,7 +21,7 @@ func TestInboundDedup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	w := New(pool, t.TempDir(), false)
+	w := New(pool, t.TempDir(), false, "")
 	first, err := w.HandleInbound(ctx, "918888888888", "Dup", "hi", "wa-msg-dedup-1")
 	if err != nil || first == "" {
 		t.Fatalf("first delivery: %q %v", first, err)

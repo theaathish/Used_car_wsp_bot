@@ -576,6 +576,10 @@ func (s *Server) patchBooking(w http.ResponseWriter, r *http.Request) {
 		if cl := auth.Current(r); cl != nil {
 			audit(r.Context(), s.Pool, cl.Email, "booking.status", "booking", id, prev, st)
 		}
+		if st == "CANCELLED" && prev != "CANCELLED" {
+			// Release the vehicle back to the lot.
+			_, _ = s.Pool.Exec(r.Context(), `UPDATE vehicles SET status='AVAILABLE', updated_at=now() WHERE id=(SELECT vehicle_id FROM bookings WHERE id=$1) AND status IN ('RESERVED','BOOKED')`, id)
+		}
 		if st == "DELIVERED" || st == "COMPLETED" {
 			_, _ = s.Pool.Exec(r.Context(), `UPDATE bookings SET status='COMPLETED', updated_at=now() WHERE id=$1`, id)
 			_, _ = s.Pool.Exec(r.Context(), `UPDATE vehicles SET status='DELIVERED', updated_at=now() WHERE id=(SELECT vehicle_id FROM bookings WHERE id=$1)`, id)

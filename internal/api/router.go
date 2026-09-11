@@ -146,12 +146,18 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.listCustomers(w, r)
 	case p == "/api/customers" && r.Method == "POST":
 		s.createCustomer(w, r)
+	case strings.HasPrefix(p, "/api/customers/") && r.Method == "PATCH":
+		s.patchCustomer(w, r)
+	case strings.HasPrefix(p, "/api/customers/") && r.Method == "DELETE":
+		s.deleteCustomer(w, r)
 	case p == "/api/leads" && r.Method == "GET":
 		s.listLeads(w, r)
 	case strings.HasPrefix(p, "/api/leads/") && strings.HasSuffix(p, "/assign") && r.Method == "PATCH":
 		s.assignLead(w, r)
 	case strings.HasPrefix(p, "/api/leads/") && strings.HasSuffix(p, "/interest") && r.Method == "PATCH":
 		s.leadInterest(w, r)
+	case strings.HasPrefix(p, "/api/leads/") && r.Method == "DELETE":
+		s.deleteLead(w, r)
 	case p == "/api/vehicles" && r.Method == "GET":
 		s.listVehicles(w, r)
 	case p == "/api/vehicles" && r.Method == "POST":
@@ -160,6 +166,8 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.uploadVehicleImage(w, r)
 	case strings.HasPrefix(p, "/api/vehicles/") && r.Method == "PATCH":
 		s.patchVehicle(w, r)
+	case strings.HasPrefix(p, "/api/vehicles/") && r.Method == "DELETE":
+		s.deleteVehicle(w, r)
 	case p == "/api/requirements" && r.Method == "GET":
 		s.listRequirements(w, r)
 	case strings.HasPrefix(p, "/api/leads/") && strings.HasSuffix(p, "/match") && r.Method == "POST":
@@ -170,6 +178,10 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.createUser(w, r)
 	case p == "/api/users" && r.Method == "GET":
 		s.listUsers(w, r)
+	case strings.HasPrefix(p, "/api/users/") && r.Method == "PATCH":
+		s.patchUser(w, r)
+	case strings.HasPrefix(p, "/api/users/") && r.Method == "DELETE":
+		s.deleteUser(w, r)
 	case p == "/api/negotiations" && r.Method == "GET":
 		s.listNegotiations(w, r)
 	case p == "/api/negotiations" && r.Method == "POST":
@@ -182,22 +194,38 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.createFinance(w, r)
 	case p == "/api/sell-requests" && r.Method == "GET":
 		s.listSellRequests(w, r)
+	case strings.HasPrefix(p, "/api/sell-requests/") && strings.HasSuffix(p, "/accept") && r.Method == "POST":
+		s.acceptSell(w, r)
+	case strings.HasPrefix(p, "/api/sell-requests/") && strings.HasSuffix(p, "/reject") && r.Method == "POST":
+		s.rejectSell(w, r)
+	case strings.HasPrefix(p, "/api/sell-requests/") && strings.HasSuffix(p, "/reopen") && r.Method == "POST":
+		s.reopenSell(w, r)
 	case p == "/api/reviews" && r.Method == "GET":
 		s.listReviews(w, r)
 	case p == "/api/reviews" && r.Method == "POST":
 		s.createReview(w, r)
+	case strings.HasPrefix(p, "/api/reviews/") && r.Method == "DELETE":
+		s.deleteReview(w, r)
+	case p == "/api/finance" && r.Method == "POST":
+		s.createFinance(w, r)
+	case strings.HasPrefix(p, "/api/finance/") && r.Method == "PATCH":
+		s.patchFinance(w, r)
 	case p == "/api/outbox" && r.Method == "GET":
 		s.listOutbox(w, r)
 	case p == "/api/test-drives" && r.Method == "GET":
 		s.listTestDrives(w, r)
 	case p == "/api/test-drives" && r.Method == "POST":
 		s.createTestDrive(w, r)
+	case strings.HasPrefix(p, "/api/test-drives/") && r.Method == "PATCH":
+		s.patchTestDrive(w, r)
 	case p == "/api/followups" && r.Method == "GET":
 		s.listFollowups(w, r)
 	case p == "/api/followups" && r.Method == "POST":
 		s.createFollowup(w, r)
 	case strings.HasPrefix(p, "/api/followups/") && r.Method == "PATCH":
 		s.patchFollowup(w, r)
+	case strings.HasPrefix(p, "/api/followups/") && r.Method == "DELETE":
+		s.deleteFollowup(w, r)
 	case p == "/api/bookings" && r.Method == "GET":
 		s.listBookings(w, r)
 	case p == "/api/bookings" && r.Method == "POST":

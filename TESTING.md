@@ -65,6 +65,24 @@ Automated here: [x] API crash recovery [x] PG restart recovery
 Manual on YOUR infra: [ ] real QR pair/reconnect/logout [ ] VPS reboot
 drill [ ] 24h (preferably 48h) soak [ ] disk-full drill [ ] log rotation.
 
+## V4 follow-ups (shipped)
+
+- WhatsApp session lives in Postgres (SQLite fallback): redeploys and
+  volume loss no longer log the bot out. **Still mount a volume at
+  `/data`** — photos and media need it (missing files show as
+  "[photo unavailable]" instead of broken icons).
+- Fixed silent `conn busy` drops: pgx forbids queries on a tx with open
+  rows, so match history and sell-photo linking never persisted. Both are
+  now collect-then-write. Lesson: never ignore tx.Exec errors; grep for
+  `_, _ = tx.Exec` before release.
+- "any" answers now skip steps via ANY sentinel (previously infinite
+  re-ask); matching ignores ANY.
+- Full CRUD: sell accept (creates vehicle + links photos) / reject /
+  reopen; deletes for customers/leads/vehicles/followups/reviews/users;
+  status PATCH for test drives/finance; user role changes with
+  last-admin guards; booking CANCELLED releases the vehicle.
+- White admin theme.
+
 ## Manual checklist (before production)
 
 WHATSAPP — [ ] QR login (`/api/whatsapp/qr`) [ ] session survives restart

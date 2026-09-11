@@ -65,7 +65,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	wa := whatsapp.New(pool, cfg.DataDir, cfg.WhatsappEnabled)
+	wa := whatsapp.New(pool, cfg.DataDir, cfg.WhatsappEnabled, cfg.DatabaseURL)
 	go wa.Start(ctx)
 	go scheduler.Followups(ctx, pool, wa)
 

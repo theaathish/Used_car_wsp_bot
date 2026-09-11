@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -290,6 +291,138 @@ func (s *Server) createFinance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"id": id})
+}
+
+func sellID(r *http.Request, suffix string) (string, bool) {
+	p := r.URL.Path[len("/api/sell-requests/"):]
+	if !strings.HasSuffix(p, suffix) {
+		return "", false
+	}
+	id := p[:len(p)-len(suffix)]
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// POST /api/sell-requests/{id}/accept {price} — valuation accepted: the car
+// enters inventory as AVAILABLE and the customer's WhatsApp photos are linked.
+func (s *Server) acceptSell(w http.ResponseWriter, r *http.Request) {
+	id, ok := sellID(r, "/accept")
+	if !ok || badUUID(w, id) {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	var in struct {
+		Price int `json:"price"`
+	}
+	_ = readJSON(r, &in)
+	if in.Price < 0 {
+		http.Error(w, `{"error":"price must be >= 0"}`, 400)
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer tx.Rollback(ctx)
+	var leadID, brand, model, reg, fuel, trans, cond, loc string
+	var year, km, photos int
+	var status string
+	err = tx.QueryRow(ctx, `SELECT lead_id::text,brand,model,year,registration,km,fuel,transmission,condition,location,photo_count,status
+		FROM sell_requests WHERE id=$1 FOR UPDATE`, id).Scan(
+		&leadID, &brand, &model, &year, &reg, &km, &fuel, &trans, &cond, &loc, &photos, &status)
+	if err != nil {
+		http.Error(w, `{"error":"sell request not found"}`, 404)
+		return
+	}
+	if status != "VALUATION_PENDING" {
+		http.Error(w, `{"error":"only VALUATION_PENDING can be accepted"}`, 409)
+		return
+	}
+	vid := uuid.NewString()
+	desc := strings.TrimSpace(cond + " " + loc + " " + reg)
+	if _, err := tx.Exec(ctx, `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'AVAILABLE',$9)`,
+		vid, brand, model, year, in.Price, fuel, trans, km, desc); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	// Link the customer's WhatsApp photos to the new vehicle. Collect first:
+	// pgx forbids new queries on a tx while rows are still open.
+	var photoPaths []string
+	rows, err := tx.Query(ctx, `SELECT DISTINCT m.media_path FROM messages m
+		JOIN conversations c ON c.id=m.conversation_id
+		WHERE c.lead_id=$1 AND m.media_path<>'' ORDER BY m.media_path`, leadID)
+	if err != nil {
+		log.Printf("[acceptSell] photo query: %v", err)
+	} else {
+		for rows.Next() {
+			var mp string
+			if err := rows.Scan(&mp); err == nil {
+				photoPaths = append(photoPaths, mp)
+			}
+		}
+		rows.Close()
+	}
+	for n, mp := range photoPaths {
+		_, _ = tx.Exec(ctx, `INSERT INTO vehicle_images(vehicle_id,path,sort_order) VALUES($1,$2,$3)`, vid, mp, n)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE sell_requests SET status='ACCEPTED' WHERE id=$1`, id); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	actor := ""
+	if cl := auth.Current(r); cl != nil {
+		actor = cl.Email
+	}
+	audit(ctx, s.Pool, actor, "sell.accept", "sell_request", id, "VALUATION_PENDING", "ACCEPTED")
+	writeJSON(w, map[string]any{"id": id, "vehicle_id": vid})
+}
+
+// POST /api/sell-requests/{id}/reject — back to the customer with a no.
+func (s *Server) rejectSell(w http.ResponseWriter, r *http.Request) {
+	id, ok := sellID(r, "/reject")
+	if !ok || badUUID(w, id) {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	var prev string
+	_ = s.Pool.QueryRow(r.Context(), `SELECT status FROM sell_requests WHERE id=$1`, id).Scan(&prev)
+	if prev == "" {
+		http.Error(w, `{"error":"sell request not found"}`, 404)
+		return
+	}
+	if _, err := s.Pool.Exec(r.Context(), `UPDATE sell_requests SET status='REJECTED' WHERE id=$1`, id); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	actor := ""
+	if cl := auth.Current(r); cl != nil {
+		actor = cl.Email
+	}
+	audit(r.Context(), s.Pool, actor, "sell.reject", "sell_request", id, prev, "REJECTED")
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// POST /api/sell-requests/{id}/reopen — back to the valuation queue.
+func (s *Server) reopenSell(w http.ResponseWriter, r *http.Request) {
+	id, ok := sellID(r, "/reopen")
+	if !ok || badUUID(w, id) {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	if _, err := s.Pool.Exec(r.Context(), `UPDATE sell_requests SET status='VALUATION_PENDING' WHERE id IN ($1) AND status IN ('REJECTED','ACCEPTED')`, id); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) listSellRequests(w http.ResponseWriter, r *http.Request) {

@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -35,6 +36,7 @@ type Worker struct {
 	pool    *pgxpool.Pool
 	enabled bool
 	dataDir string
+	dbURL   string
 
 	mu      sync.RWMutex
 	client  *whatsmeow.Client
@@ -47,6 +49,10 @@ type Worker struct {
 
 	sendMu sync.Mutex
 	lastTx map[string]time.Time // per-phone send cooldown (rate safety)
+}
+
+func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string) *Worker {
+	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting"}
 }
 
 func (w *Worker) phoneLock(phone string) *sync.Mutex {
@@ -69,10 +75,6 @@ var validStates = map[string]bool{
 	"FINANCE_INFO": true, "TESTDRIVE_ASK": true,
 	"SELL_CAR": true, "SELL_YEAR": true, "SELL_DETAILS": true, "SELL_SPECS": true, "SELL_PHOTOS": true,
 	"EXCHANGE_CURRENT": true, "EXCHANGE_WANT": true, "DONE": true,
-}
-
-func New(pool *pgxpool.Pool, dataDir string, enabled bool) *Worker {
-	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, status: "connecting"}
 }
 
 func (w *Worker) Status() map[string]any {
@@ -113,12 +115,26 @@ func (w *Worker) Start(ctx context.Context) {
 	if err := os.MkdirAll(w.dataDir, 0o755); err != nil {
 		log.Printf("[whatsapp] datadir: %v", err)
 	}
-	dbPath := filepath.Join(w.dataDir, "whatsapp.db")
-	container, err := sqlstore.New(ctx, "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Noop)
-	if err != nil {
-		log.Printf("[whatsapp] store: %v (stub mode)", err)
-		w.setStatus("disabled", "")
-		return
+	// Session store: Postgres first (survives redeploys and volume loss),
+	// SQLite file on the volume as fallback.
+	var container *sqlstore.Container
+	if w.dbURL != "" {
+		if c, err := sqlstore.New(ctx, "pgx", w.dbURL, waLog.Noop); err != nil {
+			log.Printf("[whatsapp] postgres session store unavailable, falling back to file: %v", err)
+		} else {
+			container = c
+			log.Println("[whatsapp] session store: postgres")
+		}
+	}
+	if container == nil {
+		dbPath := filepath.Join(w.dataDir, "whatsapp.db")
+		c, err := sqlstore.New(ctx, "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Noop)
+		if err != nil {
+			log.Printf("[whatsapp] store: %v (stub mode)", err)
+			w.setStatus("disabled", "")
+			return
+		}
+		container = c
 	}
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
@@ -737,7 +753,6 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 	if err != nil {
 		return nil, nil
 	}
-	defer rows.Close()
 	type v struct {
 		id, make, model, fuel, trans string
 		year, price, km              int
@@ -749,6 +764,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 			all = append(all, c)
 		}
 	}
+	rows.Close() // must close before Execs below: pgx forbids queries on a tx with open rows
 	mx := atoi(data["budget_max"])
 	mn := atoi(data["budget_min"])
 	brand := strings.ToLower(data["brand"])
@@ -768,26 +784,26 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 				score++
 			}
 		}
-		if brand != "" && !strings.Contains(strings.ToLower(c.make), brand) {
+		if brand != "" && brand != "any" && !strings.Contains(strings.ToLower(c.make), brand) {
 			return false, 0
 		}
 		score += 2
-		if model != "" && !strings.Contains(strings.ToLower(c.model), model) {
+		if model != "" && model != "any" && !strings.Contains(strings.ToLower(c.model), model) {
 			return false, 0
 		}
-		if model != "" {
+		if model != "" && model != "any" {
 			score += 2
 		}
-		if fuel != "" && !strings.EqualFold(c.fuel, data["fuel"]) {
+		if fuel != "" && fuel != "any" && !strings.EqualFold(c.fuel, data["fuel"]) {
 			return false, 0
 		}
-		if fuel != "" {
+		if fuel != "" && fuel != "any" {
 			score++
 		}
-		if trans != "" && !strings.Contains(strings.ToLower(c.trans), trans) {
+		if trans != "" && trans != "any" && !strings.Contains(strings.ToLower(c.trans), trans) {
 			return false, 0
 		}
-		if trans != "" {
+		if trans != "" && trans != "any" {
 			score++
 		}
 		if ym > 0 && c.year < ym {
@@ -820,13 +836,13 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 			continue
 		}
 		sim := false
-		if brand != "" && strings.Contains(strings.ToLower(c.make), brand) {
+		if brand != "" && brand != "any" && strings.Contains(strings.ToLower(c.make), brand) {
 			sim = true
 		}
 		if mx > 0 && c.price >= mx*75/100 && c.price <= mx*125/100 {
 			sim = true
 		}
-		if fuel != "" && strings.EqualFold(c.fuel, data["fuel"]) && mx == 0 {
+		if fuel != "" && fuel != "any" && strings.EqualFold(c.fuel, data["fuel"]) && mx == 0 {
 			sim = true
 		}
 		if !sim {
