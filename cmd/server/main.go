@@ -31,9 +31,28 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Fatalf("db connect: %v", err)
+	// Retry DB connect (Railway starts app + Postgres together; the DB
+	// is often not ready on first attempt). Back off instead of crash-looping.
+	var pool *pgxpool.Pool
+	var err error
+	for attempt := 1; ; attempt++ {
+		pool, err = db.Connect(ctx, cfg.DatabaseURL)
+		if err == nil {
+			break
+		}
+		if attempt >= 30 {
+			log.Fatalf("db connect: %v (set DATABASE_URL from the Postgres plugin)", err)
+		}
+		wait := time.Duration(attempt*2) * time.Second
+		if wait > 20*time.Second {
+			wait = 20 * time.Second
+		}
+		log.Printf("db connect (attempt %d): %v — retrying in %s", attempt, err, wait)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
 	}
 	if err := runEmbeddedMigrations(ctx, pool); err != nil {
 		log.Fatalf("migrate: %v", err)
