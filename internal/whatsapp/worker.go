@@ -49,10 +49,13 @@ type Worker struct {
 
 	sendMu sync.Mutex
 	lastTx map[string]time.Time // per-phone send cooldown (rate safety)
+
+	container *sqlstore.Container
+	repairCh  chan struct{} // wakes the supervisor to re-pair immediately
 }
 
 func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string) *Worker {
-	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting"}
+	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1)}
 }
 
 func (w *Worker) phoneLock(phone string) *sync.Mutex {
@@ -105,7 +108,9 @@ func (w *Worker) setStatus(s, jid string) {
 		s == "connected", w.lastJID)
 }
 
-// Start connects; blocks only for initial setup, runs event loop in background.
+// Start supervises the WhatsApp connection for the process lifetime:
+// pair over QR when there is no device, connect otherwise, monitor, and
+// cycle back on disconnect, logout, or an explicit Reconnect() call.
 func (w *Worker) Start(ctx context.Context) {
 	if !w.enabled {
 		w.setStatus("disabled", "")
@@ -117,16 +122,15 @@ func (w *Worker) Start(ctx context.Context) {
 	}
 	// Session store: Postgres first (survives redeploys and volume loss),
 	// SQLite file on the volume as fallback.
-	var container *sqlstore.Container
 	if w.dbURL != "" {
 		if c, err := sqlstore.New(ctx, "pgx", w.dbURL, waLog.Noop); err != nil {
 			log.Printf("[whatsapp] postgres session store unavailable, falling back to file: %v", err)
 		} else {
-			container = c
+			w.container = c
 			log.Println("[whatsapp] session store: postgres")
 		}
 	}
-	if container == nil {
+	if w.container == nil {
 		dbPath := filepath.Join(w.dataDir, "whatsapp.db")
 		c, err := sqlstore.New(ctx, "sqlite3", "file:"+dbPath+"?_foreign_keys=on", waLog.Noop)
 		if err != nil {
@@ -134,50 +138,61 @@ func (w *Worker) Start(ctx context.Context) {
 			w.setStatus("disabled", "")
 			return
 		}
-		container = c
+		w.container = c
 	}
-	device, err := container.GetFirstDevice(ctx)
-	if err != nil {
-		log.Printf("[whatsapp] device: %v", err)
-		w.setStatus("disabled", "")
-		return
-	}
-	w.client = whatsmeow.NewClient(device, waLog.Noop)
-	w.client.AddEventHandler(w.onEvent)
-	if w.client.Store.ID == nil {
-		w.setStatus("qr", "")
-		qrCh, _ := w.client.GetQRChannel(ctx)
-		if err := w.client.Connect(); err != nil {
-			log.Printf("[whatsapp] connect: %v", err)
-			w.setStatus("qr", "")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if !w.runOnce(ctx) {
 			return
 		}
-		for evt := range qrCh {
-			if evt.Event == "code" {
-				w.mu.Lock()
-				w.lastQR = evt.Code
-				w.mu.Unlock()
-				log.Println("[whatsapp] QR ready — open /admin to scan")
-			} else if evt.Event == "success" {
-				w.mu.Lock()
-				w.lastQR = ""
-				w.mu.Unlock()
-				w.setStatus("connected", "")
-				log.Println("[whatsapp] paired OK")
-				break
-			}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// runOnce pairs (QR) or connects, then monitors. False = context done.
+func (w *Worker) runOnce(ctx context.Context) bool {
+	device, err := w.container.GetFirstDevice(ctx)
+	if err != nil {
+		log.Printf("[whatsapp] device: %v", err)
+		w.setStatus("connecting", "")
+		return true
+	}
+	cli := whatsmeow.NewClient(device, waLog.Noop)
+	cli.AddEventHandler(w.onEvent)
+	w.mu.Lock()
+	if w.client != nil {
+		w.client.Disconnect()
+	}
+	w.client = cli
+	w.mu.Unlock()
+	if cli.Store.ID == nil {
+		paired, alive := w.pair(ctx, cli)
+		if !alive {
+			return false
+		}
+		if !paired {
+			return true // aborted by repair signal; outer loop re-cycles
 		}
 	} else {
-		// Reconnect loop with backoff (WA-104/105/107): never spin hot,
-		// surface terminal logout so an admin can re-authenticate (WA-107).
+		// Connect with backoff; never spin hot (WA-104/105/107).
 		backoff := 2 * time.Second
 		for {
 			w.setStatus("connecting", "")
-			if err := w.client.Connect(); err != nil {
+			if err := cli.Connect(); err != nil {
 				log.Printf("[whatsapp] reconnect failed: %v (retry in %s)", err, backoff)
 				select {
 				case <-ctx.Done():
-					return
+					return false
+				case <-w.repairCh:
+					return true
 				case <-time.After(backoff):
 				}
 				backoff *= 2
@@ -186,21 +201,98 @@ func (w *Worker) Start(ctx context.Context) {
 				}
 				continue
 			}
-			backoff = 2 * time.Second
-			w.setStatus("connected", w.client.Store.ID.String())
-			select {
-			case <-ctx.Done():
-				w.client.Disconnect()
-				return
-			case <-time.After(30 * time.Second):
-				if !w.client.IsConnected() && w.client.Store.ID != nil {
-					log.Println("[whatsapp] connection lost, retrying")
-					w.client.Disconnect()
-					continue
-				}
+			break
+		}
+	}
+	jid := ""
+	if cli.Store.ID != nil {
+		jid = cli.Store.ID.String()
+	}
+	w.setStatus("connected", jid)
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			cli.Disconnect()
+			return false
+		case <-w.repairCh:
+			cli.Disconnect()
+			return true
+		case <-t.C:
+			if !cli.IsConnected() {
+				log.Println("[whatsapp] connection lost, cycling")
+				cli.Disconnect()
+				return true
 			}
 		}
 	}
+}
+
+// pair runs QR pairing. Returns (paired, alive): alive=false only when the
+// context is done; paired=false means aborted by repair signal.
+func (w *Worker) pair(ctx context.Context, cli *whatsmeow.Client) (bool, bool) {
+	w.setStatus("qr", "")
+	qrCh, _ := cli.GetQRChannel(ctx)
+	if err := cli.Connect(); err != nil {
+		log.Printf("[whatsapp] pair connect: %v", err)
+		w.setStatus("qr", "")
+		return false, true
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return false, false
+		case <-w.repairCh:
+			cli.Disconnect()
+			return false, true
+		case evt, ok := <-qrCh:
+			if !ok {
+				return false, true
+			}
+			if evt.Event == "code" {
+				w.mu.Lock()
+				w.lastQR = evt.Code
+				w.mu.Unlock()
+				log.Println("[whatsapp] QR ready — open admin to scan")
+			} else if evt.Event == "success" {
+				w.mu.Lock()
+				w.lastQR = ""
+				w.mu.Unlock()
+				w.setStatus("connected", "")
+				log.Println("[whatsapp] paired OK")
+				return true, true
+			}
+		}
+	}
+}
+
+// Reconnect clears every stored device (wipes dead sessions) and forces an
+// immediate fresh QR pairing cycle. Safe to call in any state.
+func (w *Worker) Reconnect(ctx context.Context) error {
+	w.mu.RLock()
+	cli := w.client
+	w.mu.RUnlock()
+	if cli != nil {
+		cli.Disconnect()
+	}
+	if w.container != nil {
+		if devs, err := w.container.GetAllDevices(ctx); err == nil {
+			for _, d := range devs {
+				_ = w.container.DeleteDevice(ctx, d)
+			}
+		}
+	}
+	w.mu.Lock()
+	w.lastQR = ""
+	w.mu.Unlock()
+	select {
+	case w.repairCh <- struct{}{}:
+	default:
+	}
+	w.setStatus("qr", "")
+	log.Println("[whatsapp] session cleared by admin — fresh QR pairing starting")
+	return nil
 }
 
 func (w *Worker) onEvent(evt any) {

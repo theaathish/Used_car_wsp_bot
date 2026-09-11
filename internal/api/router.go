@@ -269,6 +269,9 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 	case p == "/api/whatsapp/logout" && r.Method == "POST":
 		_ = s.WA.Logout(r.Context())
 		writeJSON(w, map[string]any{"ok": true})
+	case p == "/api/whatsapp/reconnect" && r.Method == "POST":
+		_ = s.WA.Reconnect(r.Context())
+		writeJSON(w, map[string]any{"ok": true})
 	case p == "/api/whatsapp/simulate" && r.Method == "POST":
 		// Local tester without a phone: runs the same state machine path.
 		var in struct {

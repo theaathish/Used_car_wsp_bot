@@ -175,6 +175,11 @@ async function loadQR() {
   } catch (e) {}
 }
 async function waLogout() { if (!confirm('Unlink WhatsApp? You will need to scan again.')) return; await api('POST', '/api/whatsapp/logout'); waStatus(); }
+async function waReconnect() {
+  if (!confirm('Clear the saved session and start fresh pairing?')) return;
+  const r = await api('POST', '/api/whatsapp/reconnect', {});
+  if (r.ok) { toast('Session cleared — fresh QR coming'); setTimeout(waStatus, 3000); }
+}
 
 /* ---------- leads ---------- */
 async function loadLeads() {

@@ -105,7 +105,8 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <div class="toolbar"><input type="search" id="q_cust" placeholder="Search name / phone…" oninput="loadCust()"/></div>
 <div id="cust"></div></section>
 <section id="s-wa"><h3>WhatsApp connection</h3><div id="waCard"></div>
-<div class="row"><button onclick="waStatus()">Refresh</button><button class="danger" onclick="waLogout()">Logout session</button></div>
+<div class="row"><button onclick="waStatus()">Refresh</button><button class="primary" onclick="waReconnect()">Reconnect</button><button class="danger" onclick="waLogout()">Logout session</button></div>
+<p class="muted small">Reconnect clears the saved session and starts a fresh QR pairing — use it when the session is stuck or expired. Logout only unlinks the phone.</p>
 <div id="qrWrap"></div></section>
 <section id="s-leads"><h3>Leads</h3>
 <div class="toolbar"><input type="search" id="q_leads" placeholder="Search name / phone…" oninput="loadLeads()"/>
