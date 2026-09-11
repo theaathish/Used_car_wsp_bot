@@ -202,7 +202,14 @@ func (w *Worker) onEvent(evt any) {
 	if !ok || m.Info.IsFromMe {
 		return
 	}
-	phone := normalizePhone(m.Info.Sender.User)
+	// WhatsApp increasingly addresses senders by LID (...@lid) instead of
+	// phone number. Always resolve to the phone-number (PN) address so the
+	// customer identity is stable and replies are deliverable.
+	sender := m.Info.Sender
+	if alt := m.Info.SenderAlt; alt.User != "" && alt.Server == types.DefaultUserServer && sender.Server != types.DefaultUserServer {
+		sender = alt
+	}
+	phone := normalizePhone(sender.User)
 	name := m.Info.PushName
 	if phone == "" {
 		return
@@ -222,7 +229,10 @@ func (w *Worker) onEvent(evt any) {
 		return
 	}
 	if reply != "" {
-		_ = w.Send(context.Background(), phone, reply)
+		if err := w.Send(context.Background(), phone, reply); err != nil {
+			log.Printf("[whatsapp] send to %s failed: %v (queued in outbox)", phone, err)
+			w.markLastOutFailed(context.Background(), phone)
+		}
 	}
 }
 
@@ -575,6 +585,17 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		return "", err
 	}
 	return reply, nil
+}
+
+// markLastOutFailed flags the newest outbound message as FAILED so the
+// admin UI no longer shows undelivered replies as SENT.
+func (w *Worker) markLastOutFailed(ctx context.Context, phone string) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, _ = w.pool.Exec(ctx, `UPDATE messages SET status='FAILED' WHERE id = (
+		SELECT m.id FROM messages m JOIN conversations c ON c.id=m.conversation_id
+		JOIN customers cu ON cu.id=c.customer_id
+		WHERE cu.phone=$1 AND m.direction='out' ORDER BY m.created_at DESC LIMIT 1)`, phone)
 }
 
 // HandleMedia stores an inbound photo (INT-002 / SELL-003). The conversation
