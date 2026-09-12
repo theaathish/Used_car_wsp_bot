@@ -462,18 +462,21 @@ func normalizePhone(s string) string {
 }
 
 // isDirectChat reports whether an incoming message belongs to a 1:1 chat.
-// Groups, broadcast lists, status updates and channels are ignored.
+// Groups, broadcast lists, status updates, channels and newsletter statuses
+// are ignored. Note 1:1 chats may be addressed by phone number OR by LID.
 func isDirectChat(info types.MessageInfo) bool {
-	if info.IsGroup {
+	if info.IsGroup || info.IsIncomingBroadcast() || info.IsNewsletterStatus {
 		return false
 	}
 	if info.Chat == types.StatusBroadcastJID {
 		return false
 	}
-	if info.Chat.Server == types.NewsletterServer {
+	switch info.Chat.Server {
+	case types.DefaultUserServer, types.HiddenUserServer:
+		return info.Chat.User != ""
+	default:
 		return false
 	}
-	return info.Chat.Server == types.DefaultUserServer && info.Chat.User != ""
 }
 
 // Send delivers text via whatsmeow (stub-logs when disabled), enqueueing to
