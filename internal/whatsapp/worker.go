@@ -373,6 +373,12 @@ func (w *Worker) onEvent(evt any) {
 	if !ok || m.Info.IsFromMe {
 		return
 	}
+	// Direct chats only: ignore groups, broadcast lists, status updates
+	// and channels/newsletters. Otherwise group chatter and status views
+	// create bogus customers and get bot replies.
+	if !isDirectChat(m.Info) {
+		return
+	}
 	// WhatsApp increasingly addresses senders by LID (...@lid) instead of
 	// phone number. Always resolve to the phone-number (PN) address so the
 	// customer identity is stable and replies are deliverable.
@@ -453,6 +459,21 @@ func normalizePhone(s string) string {
 		}
 	}
 	return d
+}
+
+// isDirectChat reports whether an incoming message belongs to a 1:1 chat.
+// Groups, broadcast lists, status updates and channels are ignored.
+func isDirectChat(info types.MessageInfo) bool {
+	if info.IsGroup {
+		return false
+	}
+	if info.Chat == types.StatusBroadcastJID {
+		return false
+	}
+	if info.Chat.Server == types.NewsletterServer {
+		return false
+	}
+	return info.Chat.Server == types.DefaultUserServer && info.Chat.User != ""
 }
 
 // Send delivers text via whatsmeow (stub-logs when disabled), enqueueing to
