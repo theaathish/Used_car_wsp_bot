@@ -52,6 +52,64 @@ type Worker struct {
 
 	container *sqlstore.Container
 	repairCh  chan struct{} // wakes the supervisor to re-pair immediately
+
+	// Failure accounting: after sustained connect failures the session is
+	// almost certainly dead server-side. Surface it instead of retrying
+	// silently forever.
+	nFails  int
+	lastErr string
+}
+
+// failCount returns consecutive connect failures (for logging).
+func (w *Worker) failCount() int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.nFails
+}
+// the status becomes "expired" so the admin knows to press Reconnect.
+// Returns the backoff to wait.
+// noteFailure records a connect failure. After maxFails consecutive failures
+// the status becomes "expired" so the admin knows to press Reconnect.
+// Returns the backoff to wait.
+func (w *Worker) noteFailure(err error) time.Duration {
+	const maxFails = 15
+	msg := err.Error()
+	if len(msg) > 200 {
+		msg = msg[:200]
+	}
+	w.mu.Lock()
+	w.nFails++
+	n := w.nFails
+	w.lastErr = msg
+	st := "connecting"
+	if n >= maxFails {
+		st = "expired"
+	}
+	w.setStatusLocked(st, "")
+	jid := w.lastJID
+	w.mu.Unlock()
+	_, _ = w.pool.Exec(context.Background(),
+		`INSERT INTO whatsapp_sessions(id,connected,jid) VALUES('default',$1,$2)
+		 ON CONFLICT (id) DO UPDATE SET connected=$1, jid=$2, updated_at=now()`,
+		false, jid)
+	backoff := time.Duration(n*2) * time.Second
+	if backoff > 5*time.Minute {
+		backoff = 5 * time.Minute
+	}
+	return backoff
+}
+
+func (w *Worker) noteSuccess(jid string) {
+	w.mu.Lock()
+	w.nFails = 0
+	w.lastErr = ""
+	w.setStatusLocked("connected", jid)
+	j := w.lastJID
+	w.mu.Unlock()
+	_, _ = w.pool.Exec(context.Background(),
+		`INSERT INTO whatsapp_sessions(id,connected,jid) VALUES('default',$1,$2)
+		 ON CONFLICT (id) DO UPDATE SET connected=$1, jid=$2, updated_at=now()`,
+		true, j)
 }
 
 func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string) *Worker {
@@ -83,7 +141,8 @@ var validStates = map[string]bool{
 func (w *Worker) Status() map[string]any {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return map[string]any{"status": w.status, "jid": w.lastJID, "enabled": w.enabled, "has_qr": w.lastQR != ""}
+	return map[string]any{"status": w.status, "jid": w.lastJID, "enabled": w.enabled, "has_qr": w.lastQR != "",
+		"fail_count": w.nFails, "last_error": w.lastErr}
 }
 
 func (w *Worker) QRPNG() ([]byte, error) {
@@ -97,15 +156,20 @@ func (w *Worker) QRPNG() ([]byte, error) {
 
 func (w *Worker) setStatus(s, jid string) {
 	w.mu.Lock()
-	w.status = s
-	if jid != "" {
-		w.lastJID = jid
-	}
+	w.setStatusLocked(s, jid)
 	w.mu.Unlock()
 	_, _ = w.pool.Exec(context.Background(),
 		`INSERT INTO whatsapp_sessions(id,connected,jid) VALUES('default',$1,$2)
 		 ON CONFLICT (id) DO UPDATE SET connected=$1, jid=$2, updated_at=now()`,
 		s == "connected", w.lastJID)
+}
+
+// setStatusLocked changes status + failure counters; caller holds w.mu.
+func (w *Worker) setStatusLocked(s, jid string) {
+	w.status = s
+	if jid != "" {
+		w.lastJID = jid
+	}
 }
 
 // Start supervises the WhatsApp connection for the process lifetime:
@@ -182,22 +246,19 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 			return true // aborted by repair signal; outer loop re-cycles
 		}
 	} else {
-		// Connect with backoff; never spin hot (WA-104/105/107).
-		backoff := 2 * time.Second
+		// Connect with backoff; sustained failure marks the session expired
+		// instead of retrying silently forever.
 		for {
 			w.setStatus("connecting", "")
 			if err := cli.Connect(); err != nil {
-				log.Printf("[whatsapp] reconnect failed: %v (retry in %s)", err, backoff)
+				backoff := w.noteFailure(err)
+				log.Printf("[whatsapp] reconnect failed (#%d): %v (retry in %s)", w.failCount(), err, backoff)
 				select {
 				case <-ctx.Done():
 					return false
 				case <-w.repairCh:
 					return true
 				case <-time.After(backoff):
-				}
-				backoff *= 2
-				if backoff > 5*time.Minute {
-					backoff = 5 * time.Minute
 				}
 				continue
 			}
@@ -208,7 +269,7 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 	if cli.Store.ID != nil {
 		jid = cli.Store.ID.String()
 	}
-	w.setStatus("connected", jid)
+	w.noteSuccess(jid)
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
@@ -236,7 +297,7 @@ func (w *Worker) pair(ctx context.Context, cli *whatsmeow.Client) (bool, bool) {
 	qrCh, _ := cli.GetQRChannel(ctx)
 	if err := cli.Connect(); err != nil {
 		log.Printf("[whatsapp] pair connect: %v", err)
-		w.setStatus("qr", "")
+		w.noteFailure(err)
 		return false, true
 	}
 	for {
@@ -285,6 +346,8 @@ func (w *Worker) Reconnect(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	w.lastQR = ""
+	w.nFails = 0
+	w.lastErr = ""
 	w.mu.Unlock()
 	select {
 	case w.repairCh <- struct{}{}:
