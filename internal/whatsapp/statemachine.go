@@ -99,7 +99,7 @@ func hasBudget(s string) bool {
 
 func unknownBudget(s string) bool {
 	t := norm(s)
-	for _, p := range []string{"don't know", "dont know", "not sure", "no idea", "any", "flexible", "skip"} {
+	for _, p := range []string{"don't know", "dont know", "not sure", "no idea", "any", "flexible", "skip", "theriyala", "teriyala", "therila", "teliyadu"} {
 		if strings.Contains(t, p) {
 			return true
 		}
@@ -297,6 +297,13 @@ func stripKnown(body string) string {
 	}
 	return strings.Join(kept, " ")
 }
+
+// remBrand is the brand-step remainder: stripKnown plus RM/MYR currency words.
+func remBrand(body string) string {
+	t := regexp.MustCompile(`\brm\b`).ReplaceAllString(strings.ToLower(body), " ")
+	t = regexp.MustCompile(`\bmyr\b`).ReplaceAllString(t, " ")
+	return stripKnown(t)
+}
 func nextMissingBuy(data map[string]string) string {
 	if data["budget_max"] == "" && data["budget_unknown"] == "" {
 		return "BUY_BUDGET"
@@ -459,13 +466,37 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		return nxt, "Noted budget. "+promptFor(nxt), "BUY", "QUALIFIED", patch
 	case "BUY_BRAND":
+		// Out-of-order: "petrol" at brand step means fuel, not a brand.
+		if f := findFuel(body); f != "" {
+			patch["fuel"] = f
+		}
+		if tr := findTrans(body); tr != "" {
+			patch["transmission"] = tr
+		}
+		for k, v := range ExtractAll(body) {
+			if k == "year_min" || k == "budget_min" || k == "budget_max" {
+				patch[k] = v
+			}
+		}
+		if rem := stripKnown(body); rem == "" {
+			merged := merge(data, patch)
+			if len(patch) > 0 {
+				return nextMissingBuy(merged), "Got it. " + promptFor(nextMissingBuy(merged)), "BUY", "QUALIFIED", patch
+			}
+			return "BUY_BRAND", "Which brand? (e.g. BMW, MINI, Audi, or *any*)", "BUY", "QUALIFIED", patch
+		}
 		if b == "" || b == "any" || b == "no" {
 			patch["brand"] = "ANY"
-		} else if br, mo := SplitBrandModel(body); mo != "" {
+		} else if br, mo := extractBrandModel(body); br != "" && mo != "" {
 			patch["brand"] = br // "BMW X1" in brand step fills both
 			patch["model"] = mo
+		} else if br, _ := extractBrandModel(body); br != "" {
+			patch["brand"] = br
+		} else if br, mo := SplitBrandModel(remBrand(body)); mo != "" {
+			patch["brand"] = br
+			patch["model"] = mo
 		} else {
-			patch["brand"] = strings.TrimSpace(body)
+			patch["brand"] = strings.TrimSpace(remBrand(body))
 		}
 		merged := merge(data, patch)
 		if merged["model"] != "" {
