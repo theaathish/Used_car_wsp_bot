@@ -27,14 +27,11 @@ async function api(method, path, body) {
 function fmtDate(s) {
   if (!s) return '—';
   const d = new Date(s); if (isNaN(d)) return String(s);
-  return d.toLocaleString('en-IN', {day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true});
+  return d.toLocaleString('en-MY', {day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true});
 }
 function fmtMoney(n) {
   n = +n || 0;
-  if (n >= 1e7) return '₹' + (n / 1e7).toFixed(2).replace(/\.00$/, '') + ' Cr';
-  if (n >= 1e5) return '₹' + (n / 1e5).toFixed(2).replace(/\.00$/, '') + ' L';
-  if (n >= 1e3) return '₹' + (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
-  return '₹' + n;
+  return 'RM ' + n.toLocaleString('en-MY');
 }
 const PILLMAP = {AVAILABLE: 'green', DELIVERED: 'green', COMPLETED: 'green', CONVERTED: 'green', INTERESTED: 'green', SENT: 'green',
   RESERVED: 'amber', PENDING: 'amber', VALUATION_PENDING: 'amber', THINKING: 'amber', FOLLOWUP: 'amber', TEST_DRIVE: 'amber', SCHEDULED: 'amber',
@@ -316,7 +313,10 @@ function renderVeh() {
     const delBtn = ME.role === 'admin' ? ' <button class="small danger" onclick="delVeh(\'' + o.id + '\',\'' + esc(o.make + ' ' + o.model).replace(/'/g, "\\'") + '\')">Delete</button>' : '';
     return '<div class="vcard">' + (imgs.length ? '<img src="' + esc(imgs[0]) + '" loading="lazy" onerror="this.remove()"/>' : '') +
       '<div class="b"><div class="t">' + esc(o.make) + ' ' + esc(o.model) + ' ' + esc(o.year) + '</div>' +
-      '<div class="spec">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + Number(o.km || 0).toLocaleString('en-IN') + ' km</div>' +
+      '<div class="spec">' + [o.fuel, o.transmission].filter(Boolean).join(' · ') + (o.fuel || o.transmission ? ' · ' : '') + Number(o.km || 0).toLocaleString('en-MY') + ' km</div>' +
+      ((o.stock_no || o.reg_num || o.colour || o.stock_location) ? '<div class="spec">' + [o.stock_no, o.reg_num, o.colour, o.stock_location].filter(Boolean).map(esc).join(' · ') + '</div>' : '') +
+      ((o.stock_status || o.warranty) ? '<div class="spec">' + [o.stock_status, o.warranty].filter(Boolean).map(esc).join(' · ') + '</div>' : '') +
+      (o.claims ? '<div class="spec">Note: ' + esc(o.claims) + '</div>' : '') +
       '<div class="price">' + fmtMoney(o.price) + '</div>' + pill(o.status) + ' ' + sid(o.id) +
       '<div class="thumbs">' + imgs.map(function (p) { return '<a href="' + esc(p) + '" target="_blank"><img src="' + esc(p) + '" loading="lazy" onerror="this.closest(\'a\').remove()"/></a>'; }).join('') + '</div>' +
       '<div class="acts">' + acts + delBtn + ' <label class="small" style="cursor:pointer;border:1px solid #c4cede;border-radius:8px;padding:4px 8px">+ Photos<input type="file" accept="image/*" multiple style="display:none" onchange="uploadVeh(\'' + o.id + '\',this)"/></label></div>' +
@@ -545,7 +545,7 @@ async function delUser(id, email) {
   if (r.ok) { toast('Removed'); loadUsers(); }
 }
 async function sellAccept(id) {
-  const v = prompt('Accept valuation — enter agreed price in Rs:', '0');
+  const v = prompt('Accept valuation — enter agreed price in RM:', '0');
   if (v === null) return;
   const r = await api('POST', '/api/sell-requests/' + id + '/accept', {price: +v || 0});
   if (r.ok) { toast('Accepted — car added to inventory'); loadSELL(); loadVeh(); }
