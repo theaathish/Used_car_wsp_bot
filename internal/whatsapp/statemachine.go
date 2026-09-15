@@ -18,19 +18,22 @@ var transmissions = []string{"automatic", "manual", "amt", "cvt", "dct"}
 // maxModelYear caps year input at next calendar year (BUY-107).
 func maxModelYear() int { return time.Now().Year() + 1 }
 
-// ParseBudget extracts min/max rupees from free text like "5 lakh", "5l",
-// "500000", "3-6 lakh", "₹15,00,000". Returns 0,0 when absent or invalid
-// (zero/negative) so callers reprompt instead of storing garbage.
+// ParseBudget extracts min/max from free text like "5 lakh", "5l",
+// "500000", "3-6 lakh", "₹15,00,000", "RM 90,000", "RM150k", "100-200k".
+// Returns 0,0 when absent or invalid so callers reprompt.
 func ParseBudget(s string) (int, int) {
 	t := strings.ToLower(s)
 	if regexp.MustCompile(`(^|\s)-\s*\d`).MatchString(t) {
 		return 0, 0 // BUY-106 negative
 	}
 	// Normalize currency first: drop symbols and grouping commas so Indian
-	// grouping ("15,00,000") parses as one number (BUY-104).
+	// grouping ("15,00,000") parses as one number (BUY-104). RM/MYR for MY.
 	t = strings.ReplaceAll(t, "₹", " ")
 	t = strings.ReplaceAll(t, "rs.", " ")
 	t = strings.ReplaceAll(t, "rs", " ")
+	t = strings.ReplaceAll(t, "rm", " ")
+	t = strings.ReplaceAll(t, "myr", " ")
+	t = strings.ReplaceAll(t, "ringgit", " ")
 	t = strings.ReplaceAll(t, ",", "")
 	mult := 1
 	if strings.Contains(t, "lakh") || strings.Contains(t, " lac") || strings.Contains(t, "lac") {
@@ -225,14 +228,21 @@ func extractBrandModel(body string) (string, string) {
 	}
 	t = regexp.MustCompile(`under\s+[\d,]+\s*(lakh|lac|l|k)?`).ReplaceAllString(t, " ")
 	t = regexp.MustCompile(`[\d,]+\s*(lakh|lac)`).ReplaceAllString(t, " ")
+	t = regexp.MustCompile(`\brm\b`).ReplaceAllString(t, " ")
+	t = regexp.MustCompile(`\bmyr\b`).ReplaceAllString(t, " ")
+	t = regexp.MustCompile(`\bringgit\b`).ReplaceAllString(t, " ")
 	t = regexp.MustCompile(`\b\d{4}\b`).ReplaceAllString(t, " ") // years aren't brand/model
 	stop := map[string]bool{"car": true, "any": true, "with": true, "and": true, "or": true, "in": true, "under": true, "below": true, "around": true,
 		"bro": true, "hey": true, "hello": true, "hi": true, "please": true, "da": true, "machi": true, "macha": true, "anna": true, "sir": true, "madam": true, "ji": true,
-		"venum": true, "chahiye": true, "want": true, "need": true, "looking": true, "purchase": true, "gaadi": true, "vandi": true, "for": true, "me": true, "a": true}
+		"venum": true, "chahiye": true, "want": true, "need": true, "looking": true, "purchase": true, "gaadi": true, "vandi": true, "for": true, "me": true, "a": true,
+		"rm": true, "myr": true, "ringgit": true, "rs": true, "lakh": true, "lac": true, "k": true, "budget": true, "is": true, "of": true, "my": true}
 	words := []string{}
 	for _, wd := range strings.Fields(t) {
 		if stop[wd] {
 			continue
+		}
+		if _, err := strconv.Atoi(strings.ReplaceAll(wd, ",", "")); err == nil {
+			continue // pure numbers are budget, never brand/model
 		}
 		if !strings.ContainsAny(wd, "abcdefghijklmnopqrstuvwxyz0123456789") {
 			continue // emoji/symbols are never brand or model
@@ -312,7 +322,7 @@ func nextMissingBuy(data map[string]string) string {
 func promptFor(state string) string {
 	switch state {
 	case "BUY_BUDGET":
-		return "What's your budget? (e.g. 3-5 lakh, or reply *don't know*)"
+		return "What's your budget? (e.g. RM 90,000, 100-200k, or reply *don't know*)"
 	case "BUY_BRAND":
 		return "Which brand? (e.g. Maruti, Hyundai, BMW, or *any*)"
 	case "BUY_MODEL":

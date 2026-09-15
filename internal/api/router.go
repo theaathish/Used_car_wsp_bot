@@ -164,6 +164,8 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.listVehicles(w, r)
 	case p == "/api/vehicles" && r.Method == "POST":
 		s.createVehicle(w, r)
+	case p == "/api/vehicles/import" && r.Method == "POST":
+		s.importVehicles(w, r)
 	case strings.HasPrefix(p, "/api/vehicles/") && strings.HasSuffix(p, "/images") && r.Method == "POST":
 		s.uploadVehicleImage(w, r)
 	case strings.HasPrefix(p, "/api/vehicles/") && r.Method == "PATCH":

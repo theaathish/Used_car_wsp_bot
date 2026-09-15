@@ -58,6 +58,13 @@ type Worker struct {
 	// silently forever.
 	nFails  int
 	lastErr string
+
+	// Flap accounting: Connect() succeeds but the socket drops within a
+	// minute, over and over (duplicate worker sharing one Postgres device,
+	// phone killing companions, bad network). Without this the UI sits at
+	// "connecting" for a day with fail_count 0 and no last_error.
+	cycles    []time.Time
+	lastCycle string
 }
 
 // failCount returns consecutive connect failures (for logging).
@@ -112,6 +119,42 @@ func (w *Worker) noteSuccess(jid string) {
 		true, j)
 }
 
+// noteFlap records a connect-then-drop cycle. 6+ cycles in 10 min flips to
+// "expired" so the admin gets the Reconnect prompt instead of a day of
+// "connecting". Returns true when expired.
+func (w *Worker) noteFlap(reason string) bool {
+	if len(reason) > 200 {
+		reason = reason[:200]
+	}
+	w.mu.Lock()
+	now := time.Now()
+	keep := w.cycles[:0]
+	for _, t := range w.cycles {
+		if now.Sub(t) < 10*time.Minute {
+			keep = append(keep, t)
+		}
+	}
+	keep = append(keep, now)
+	w.cycles = keep
+	w.lastCycle = reason
+	w.lastErr = reason
+	expired := len(keep) >= 6
+	st := "connecting"
+	if expired {
+		st = "expired"
+	}
+	w.setStatusLocked(st, "")
+	jid := w.lastJID
+	n := len(keep)
+	w.mu.Unlock()
+	_, _ = w.pool.Exec(context.Background(),
+		`INSERT INTO whatsapp_sessions(id,connected,jid) VALUES('default',$1,$2)
+		 ON CONFLICT (id) DO UPDATE SET connected=$1, jid=$2, updated_at=now()`,
+		false, jid)
+	log.Printf("[whatsapp] cycle #%d in 10min (%s) -> %s", n, reason, st)
+	return expired
+}
+
 func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string) *Worker {
 	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1)}
 }
@@ -142,7 +185,7 @@ func (w *Worker) Status() map[string]any {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return map[string]any{"status": w.status, "jid": w.lastJID, "enabled": w.enabled, "has_qr": w.lastQR != "",
-		"fail_count": w.nFails, "last_error": w.lastErr}
+		"fail_count": w.nFails, "last_error": w.lastErr, "last_cycle": w.lastCycle, "cycles_10m": len(w.cycles)}
 }
 
 func (w *Worker) QRPNG() ([]byte, error) {
@@ -246,11 +289,15 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 			return true // aborted by repair signal; outer loop re-cycles
 		}
 	} else {
-		// Connect with backoff; sustained failure marks the session expired
-		// instead of retrying silently forever.
+		// Connect with timeout + backoff; a hanging dial can't stick at
+		// "connecting" for a day, and sustained failure marks the session
+		// expired instead of retrying silently forever.
 		for {
 			w.setStatus("connecting", "")
-			if err := cli.Connect(); err != nil {
+			cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			err := cli.ConnectContext(cctx)
+			cancel()
+			if err != nil {
 				backoff := w.noteFailure(err)
 				log.Printf("[whatsapp] reconnect failed (#%d): %v (retry in %s)", w.failCount(), err, backoff)
 				select {
@@ -270,6 +317,7 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 		jid = cli.Store.ID.String()
 	}
 	w.noteSuccess(jid)
+	connectedAt := time.Now()
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
@@ -282,7 +330,9 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 			return true
 		case <-t.C:
 			if !cli.IsConnected() {
-				log.Println("[whatsapp] connection lost, cycling")
+				uptime := time.Since(connectedAt).Round(time.Second)
+				reason := "socket dropped after " + uptime.String() + " (duplicate worker sharing one device, phone offline, or network flap)"
+				w.noteFlap(reason)
 				cli.Disconnect()
 				return true
 			}
@@ -348,6 +398,8 @@ func (w *Worker) Reconnect(ctx context.Context) error {
 	w.lastQR = ""
 	w.nFails = 0
 	w.lastErr = ""
+	w.cycles = nil
+	w.lastCycle = ""
 	w.mu.Unlock()
 	select {
 	case w.repairCh <- struct{}{}:
@@ -364,8 +416,17 @@ func (w *Worker) onEvent(evt any) {
 		log.Printf("[whatsapp] logged out (reason %v) — admin re-auth required", e.Reason)
 		w.setStatus("logged_out", "")
 		return
+	case *events.Connected:
+		log.Println("[whatsapp] socket connected")
+		return
+	case *events.ConnectFailure:
+		log.Printf("[whatsapp] connect failure: %s", e.Reason.String())
+		return
+	case *events.TemporaryBan:
+		log.Printf("[whatsapp] temp ban code=%v expire=%v", e.Code, e.Expire)
+		return
 	case *events.Disconnected:
-		log.Println("[whatsapp] disconnected, reconnect loop continues")
+		log.Printf("[whatsapp] disconnected event, reconnect loop continues")
 		w.setStatus("connecting", w.lastJID)
 		return
 	}
@@ -377,27 +438,45 @@ func (w *Worker) onEvent(evt any) {
 	// and channels/newsletters. Otherwise group chatter and status views
 	// create bogus customers and get bot replies.
 	if !isDirectChat(m.Info) {
+		log.Printf("[whatsapp] ignored non-direct chat=%s group=%v broadcast=%v newsletter=%v from=%s",
+			m.Info.Chat.String(), m.Info.IsGroup, m.Info.IsIncomingBroadcast(), m.Info.IsNewsletterStatus, m.Info.Sender.String())
 		return
 	}
-	// WhatsApp increasingly addresses senders by LID (...@lid) instead of
-	// phone number. Always resolve to the phone-number (PN) address so the
-	// customer identity is stable and replies are deliverable.
-	sender := m.Info.Sender
-	if alt := m.Info.SenderAlt; alt.User != "" && alt.Server == types.DefaultUserServer && sender.Server != types.DefaultUserServer {
-		sender = alt
-	}
-	phone := normalizePhone(sender.User)
+	// Identity: prefer the phone-number (PN) address so the customer row is
+	// stable across LID/PN rotations. LID-only contacts (SenderAlt empty,
+	// privacy mode) fall back to "lid:<id>" so replies still route via @lid
+	// instead of a bogus @s.whatsapp.net JID (which silently never delivers).
+	phone, replyJID := resolveIdentity(m.Info)
 	name := m.Info.PushName
 	if phone == "" {
+		log.Printf("[whatsapp] ignored: empty identity sender=%s chat=%s", m.Info.Sender.String(), m.Info.Chat.String())
 		return
 	}
 	waID := string(m.Info.ID)
-	if img := m.Message.GetImageMessage(); img != nil {
-		w.onImage(phone, name, waID, img)
+	if img := unwrap(m.Message).GetImageMessage(); img != nil {
+		caption := img.GetCaption()
+		w.onImageJID(replyJID, phone, name, waID, img)
+		if caption != "" {
+			// Photo caption can carry a command ("DONE", "1", ...): process
+			// it as text too (media dedup key differs, so no double-drop).
+			body := caption
+			reply, err := w.HandleInbound(context.Background(), phone, name, body, waID)
+			if err != nil {
+				log.Printf("[whatsapp] inbound %s (caption): %v", phone, err)
+				return
+			}
+			if reply != "" {
+				if err := w.SendToJID(context.Background(), replyJID, phone, reply); err != nil {
+					log.Printf("[whatsapp] send to %s (%s) failed: %v (queued in outbox)", phone, replyJID.String(), err)
+					w.markLastOutFailed(context.Background(), phone)
+				}
+			}
+		}
 		return
 	}
 	body := messageText(m.Message)
 	if body == "" {
+		log.Printf("[whatsapp] ignored empty-text from %s chat=%s type=%s (need unwrap support?)", phone, m.Info.Chat.String(), messageKind(m.Message))
 		return
 	}
 	reply, err := w.HandleInbound(context.Background(), phone, name, body, waID)
@@ -406,8 +485,8 @@ func (w *Worker) onEvent(evt any) {
 		return
 	}
 	if reply != "" {
-		if err := w.Send(context.Background(), phone, reply); err != nil {
-			log.Printf("[whatsapp] send to %s failed: %v (queued in outbox)", phone, err)
+		if err := w.SendToJID(context.Background(), replyJID, phone, reply); err != nil {
+			log.Printf("[whatsapp] send to %s (%s) failed: %v (queued in outbox)", phone, replyJID.String(), err)
 			w.markLastOutFailed(context.Background(), phone)
 		}
 	}
@@ -415,6 +494,10 @@ func (w *Worker) onEvent(evt any) {
 
 // onImage stores inbound media without breaking the conversation (INT-002).
 func (w *Worker) onImage(phone, name, waID string, img *waE2E.ImageMessage) {
+	w.onImageJID(phoneToJID(phone), phone, name, waID, img)
+}
+
+func (w *Worker) onImageJID(replyJID types.JID, phone, name, waID string, img *waE2E.ImageMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	var data []byte
@@ -434,21 +517,146 @@ func (w *Worker) onImage(phone, name, waID string, img *waE2E.ImageMessage) {
 		return
 	}
 	if ack != "" {
-		_ = w.Send(ctx, phone, ack)
+		_ = w.SendToJID(ctx, replyJID, phone, ack)
 	}
+}
+
+// unwrap strips disappearing/view-once/edited/device-sent wrappers so text
+// and captions are found even when the user enabled disappearing messages
+// (the top #1 "no reply at all" cause on live phones; simulators never use them).
+func unwrap(m *waE2E.Message) *waE2E.Message {
+	for i := 0; i < 5 && m != nil; i++ {
+		if dm := m.GetDeviceSentMessage(); dm != nil && dm.GetMessage() != nil {
+			m = dm.GetMessage()
+			continue
+		}
+		if em := m.GetEphemeralMessage(); em != nil && em.GetMessage() != nil {
+			m = em.GetMessage()
+			continue
+		}
+		if vm := m.GetViewOnceMessage(); vm != nil && vm.GetMessage() != nil {
+			m = vm.GetMessage()
+			continue
+		}
+		if v2 := m.GetViewOnceMessageV2(); v2 != nil && v2.GetMessage() != nil {
+			m = v2.GetMessage()
+			continue
+		}
+		if v2e := m.GetViewOnceMessageV2Extension(); v2e != nil && v2e.GetMessage() != nil {
+			m = v2e.GetMessage()
+			continue
+		}
+		if ed := m.GetEditedMessage(); ed != nil && ed.GetMessage() != nil {
+			m = ed.GetMessage()
+			continue
+		}
+		if dc := m.GetDocumentWithCaptionMessage(); dc != nil && dc.GetMessage() != nil {
+			m = dc.GetMessage()
+			continue
+		}
+		break
+	}
+	if m == nil {
+		return &waE2E.Message{}
+	}
+	return m
 }
 
 func messageText(m *waE2E.Message) string {
 	if m == nil {
 		return ""
 	}
+	m = unwrap(m)
 	if t := m.GetConversation(); t != "" {
 		return t
 	}
 	if m.ExtendedTextMessage != nil {
 		return m.ExtendedTextMessage.GetText()
 	}
+	// Interactive / button / list taps arrive as response objects, not text.
+	// Without these, tapping a reply button looks like "no reply at all".
+	if br := m.GetButtonsResponseMessage(); br != nil {
+		if t := br.GetSelectedDisplayText(); t != "" {
+			return t
+		}
+		return br.GetSelectedButtonID()
+	}
+	if lr := m.GetListResponseMessage(); lr != nil {
+		if s := lr.GetSingleSelectReply(); s != nil && s.GetSelectedRowID() != "" {
+			if t := lr.GetTitle(); t != "" {
+				return t
+			}
+			return s.GetSelectedRowID()
+		}
+		return lr.GetTitle()
+	}
+	if tr := m.GetTemplateButtonReplyMessage(); tr != nil {
+		if t := tr.GetSelectedDisplayText(); t != "" {
+			return t
+		}
+		return tr.GetSelectedID()
+	}
+	if ir := m.GetInteractiveResponseMessage(); ir != nil {
+		if b := ir.GetBody(); b != nil && b.GetText() != "" {
+			return b.GetText()
+		}
+		if n := ir.GetNativeFlowResponseMessage(); n != nil && n.GetParamsJSON() != "" {
+			return n.GetParamsJSON()
+		}
+	}
+	// Media captions (user sends photo/video with "DONE" or "1").
+	if im := m.GetImageMessage(); im != nil && im.GetCaption() != "" {
+		return im.GetCaption()
+	}
+	if vm := m.GetVideoMessage(); vm != nil && vm.GetCaption() != "" {
+		return vm.GetCaption()
+	}
+	if dm := m.GetDocumentMessage(); dm != nil && dm.GetCaption() != "" {
+		return dm.GetCaption()
+	}
 	return ""
+}
+
+// messageKind names the payload for "ignored empty-text" diagnostics.
+func messageKind(m *waE2E.Message) string {
+	if m == nil {
+		return "nil"
+	}
+	m = unwrap(m)
+	switch {
+	case m.GetConversation() != "":
+		return "conversation"
+	case m.ExtendedTextMessage != nil:
+		return "extended"
+	case m.GetImageMessage() != nil:
+		return "image"
+	case m.GetVideoMessage() != nil:
+		return "video"
+	case m.GetDocumentMessage() != nil:
+		return "document"
+	case m.GetAudioMessage() != nil:
+		return "audio/ptt"
+	case m.GetButtonsResponseMessage() != nil:
+		return "buttons-response"
+	case m.GetListResponseMessage() != nil:
+		return "list-response"
+	case m.GetTemplateButtonReplyMessage() != nil:
+		return "template-reply"
+	case m.GetInteractiveResponseMessage() != nil:
+		return "interactive-response"
+	case m.GetReactionMessage() != nil:
+		return "reaction"
+	case m.GetStickerMessage() != nil:
+		return "sticker"
+	case m.GetLocationMessage() != nil || m.GetLiveLocationMessage() != nil:
+		return "location"
+	case m.GetContactMessage() != nil || m.ContactsArrayMessage != nil:
+		return "contact"
+	case m.GetPollCreationMessage() != nil || m.GetPollUpdateMessage() != nil:
+		return "poll"
+	default:
+		return "other/unsupported"
+	}
 }
 
 func normalizePhone(s string) string {
@@ -463,7 +671,8 @@ func normalizePhone(s string) string {
 
 // isDirectChat reports whether an incoming message belongs to a 1:1 chat.
 // Groups, broadcast lists, status updates, channels and newsletter statuses
-// are ignored. Note 1:1 chats may be addressed by phone number OR by LID.
+// are ignored. Note 1:1 chats may be addressed by phone number, LID, or
+// hosted LID.
 func isDirectChat(info types.MessageInfo) bool {
 	if info.IsGroup || info.IsIncomingBroadcast() || info.IsNewsletterStatus {
 		return false
@@ -472,27 +681,80 @@ func isDirectChat(info types.MessageInfo) bool {
 		return false
 	}
 	switch info.Chat.Server {
-	case types.DefaultUserServer, types.HiddenUserServer:
+	case types.DefaultUserServer, types.HiddenUserServer, types.HostedLIDServer:
 		return info.Chat.User != ""
 	default:
 		return false
 	}
 }
 
+// phoneToJID routes stored identities: "lid:<id>" goes to @lid, everything
+// else (digits phone) goes to @s.whatsapp.net.
+func phoneToJID(phone string) types.JID {
+	if strings.HasPrefix(phone, "lid:") {
+		return types.NewJID(strings.TrimPrefix(phone, "lid:"), types.HiddenUserServer)
+	}
+	return types.NewJID(phone, types.DefaultUserServer)
+}
+
+// resolveIdentity prefers the PN address for a stable customer row, and falls
+// back to "lid:<id>" for LID-only privacy contacts. It also returns the
+// Chat JID to reply to (never reconstruct from phone alone).
+func resolveIdentity(info types.MessageInfo) (string, types.JID) {
+	replyJID := info.Chat
+	if replyJID.User == "" {
+		replyJID = info.Sender
+	}
+	pn := ""
+	for _, j := range []types.JID{info.SenderAlt, info.Sender, info.Chat} {
+		if j.Server == types.DefaultUserServer {
+			if d := normalizePhone(j.User); d != "" {
+				pn = d
+				break
+			}
+		}
+	}
+	if pn != "" {
+		return pn, replyJID
+	}
+	for _, j := range []types.JID{info.Sender, info.SenderAlt, info.Chat} {
+		if j.Server == types.HiddenUserServer || j.Server == types.HostedLIDServer {
+			if d := normalizePhone(j.User); d != "" {
+				return "lid:" + d, replyJID
+			}
+		}
+	}
+	// Last resort: raw digits (keeps old behaviour, logged upstream).
+	if d := normalizePhone(info.Sender.User); d != "" {
+		return d, replyJID
+	}
+	return "", replyJID
+}
+
 // Send delivers text via whatsmeow (stub-logs when disabled), enqueueing to
 // outbox on transport failure so WA-F003 PENDING->SENT recovery holds.
 // A 2s per-phone cooldown queues (not drops) bursts (§21: no spam behavior).
 func (w *Worker) Send(ctx context.Context, phone, text string) error {
+	return w.SendToJID(ctx, phoneToJID(phone), phone, text)
+}
+
+// SendToJID delivers to the exact Chat JID (LID-safe) while keeping the
+// stable phone identity for outbox retries and the CRM row.
+func (w *Worker) SendToJID(ctx context.Context, jid types.JID, phone, text string) error {
+	key := phone
+	if key == "" {
+		key = jid.String()
+	}
 	w.sendMu.Lock()
 	if w.lastTx == nil {
 		w.lastTx = map[string]time.Time{}
 	}
-	if dt := time.Since(w.lastTx[phone]); dt < 2*time.Second {
+	if dt := time.Since(w.lastTx[key]); dt < 2*time.Second {
 		w.sendMu.Unlock()
 		_, _ = w.pool.Exec(ctx, `INSERT INTO outbox(phone,body,status) VALUES($1,$2,'PENDING') ON CONFLICT DO NOTHING`, phone, text)
 		return nil
 	}
-	w.lastTx[phone] = time.Now()
+	w.lastTx[key] = time.Now()
 	w.sendMu.Unlock()
 
 	w.mu.RLock()
@@ -500,10 +762,9 @@ func (w *Worker) Send(ctx context.Context, phone, text string) error {
 	st := w.status
 	w.mu.RUnlock()
 	if !w.enabled || cli == nil || st != "connected" {
-		log.Printf("[whatsapp:stub] -> %s: %s", phone, text)
+		log.Printf("[whatsapp:stub] -> %s (%s): %s", phone, jid.String(), text)
 		return nil
 	}
-	jid := types.NewJID(phone, types.DefaultUserServer)
 	_, err := cli.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(text)})
 	if err != nil {
 		_, _ = w.pool.Exec(ctx, `INSERT INTO outbox(phone,body,status) VALUES($1,$2,'PENDING') ON CONFLICT DO NOTHING`, phone, text)
@@ -541,7 +802,7 @@ func (w *Worker) FlushOutbox(ctx context.Context) {
 	}
 	rows.Close()
 	for _, it := range items {
-		jid := types.NewJID(it.phone, types.DefaultUserServer)
+		jid := phoneToJID(it.phone)
 		_, err := cli.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(it.body)})
 		if err != nil {
 			if it.att+1 >= 10 {
@@ -1077,13 +1338,13 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		if model != "" && model != "any" {
 			score += 2
 		}
-		if fuel != "" && fuel != "any" && !strings.EqualFold(c.fuel, data["fuel"]) {
+		if fuel != "" && fuel != "any" && c.fuel != "" && !strings.EqualFold(c.fuel, data["fuel"]) {
 			return false, 0
 		}
 		if fuel != "" && fuel != "any" {
 			score++
 		}
-		if trans != "" && trans != "any" && !strings.Contains(strings.ToLower(c.trans), trans) {
+		if trans != "" && trans != "any" && c.trans != "" && !strings.Contains(strings.ToLower(c.trans), trans) {
 			return false, 0
 		}
 		if trans != "" && trans != "any" {
@@ -1108,7 +1369,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		}
 		_, _ = tx.Exec(ctx, `INSERT INTO vehicle_matches(lead_id,vehicle_id,score) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, leadID, c.id, score)
 		exactIDs[c.id] = true
-		exact = append(exact, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — Rs.%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
+		exact = append(exact, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — RM%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
 	}
 	// Similar: same brand, or within ±25% of budget, or same fuel — excluding exact.
 	for _, c := range all {
@@ -1128,7 +1389,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		if !sim {
 			continue
 		}
-		similar = append(similar, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — Rs.%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
+		similar = append(similar, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — RM%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
 		if len(similar) >= 9 {
 			break
 		}

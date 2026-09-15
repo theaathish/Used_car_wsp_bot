@@ -17,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -58,7 +57,7 @@ func (w *Worker) SendImage(ctx context.Context, phone, absPath, caption string) 
 		FileSHA256:    up.FileSHA256,
 		FileLength:    &up.FileLength,
 	}}
-	_, err = cli.SendMessage(ctx, types.NewJID(phone, types.DefaultUserServer), msg)
+	_, err = cli.SendMessage(ctx, phoneToJID(phone), msg)
 	return err
 }
 
@@ -122,21 +121,35 @@ func (w *Worker) vehicleDetails(ctx context.Context, tx pgx.Tx, matchIDs string,
 	return w.vehicleByID(ctx, tx, strings.TrimSpace(ids[sel-1]))
 }
 
-// vehicleByID loads one vehicle card.
+// vehicleByID loads one vehicle card (SDAS fields appended when present).
 func (w *Worker) vehicleByID(ctx context.Context, tx pgx.Tx, id string) (vehicleDetail, bool) {
 	var vd vehicleDetail
 	var mk, md, fuel, trans, desc, status string
+	var stockNo, stockLoc, regNum, colour, stockStatus, warranty, claims string
 	var year, price, km int
-	if err := tx.QueryRow(ctx, `SELECT make,model,year,price,fuel,transmission,km,COALESCE(description,''),status FROM vehicles WHERE id=$1`,
-		id).Scan(&mk, &md, &year, &price, &fuel, &trans, &km, &desc, &status); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT make,model,year,price,fuel,transmission,km,COALESCE(description,''),status,
+		COALESCE(stock_no,''),COALESCE(stock_location,''),COALESCE(reg_num,''),COALESCE(colour,''),
+		COALESCE(stock_status,''),COALESCE(warranty,''),COALESCE(claims,'') FROM vehicles WHERE id=$1`,
+		id).Scan(&mk, &md, &year, &price, &fuel, &trans, &km, &desc, &status,
+		&stockNo, &stockLoc, &regNum, &colour, &stockStatus, &warranty, &claims); err != nil {
 		return vd, false
 	}
 	vd.id = id
-	vd.text = fmt.Sprintf("*%s %s %d* — Rs.%d\n%s · %s · %s km%s%s",
+	extra := ""
+	if regNum != "" || colour != "" || stockLoc != "" {
+		extra += "\n" + strings.TrimSpace(regNum+" · "+colour+" · "+stockLoc)
+	}
+	if stockStatus != "" || warranty != "" {
+		extra += "\n" + strings.TrimSpace(stockStatus+" · "+warranty)
+	}
+	if claims != "" {
+		extra += "\nNote: " + claims
+	}
+	vd.text = fmt.Sprintf("*%s %s %d* — RM%d\n%s · %s · %s km%s%s%s",
 		mk, md, year, price, fuel, trans, itoaComma(km),
-		commaDesc(desc),
+		commaDesc(desc), extra,
 		notAvailNote(status))
-	vd.caption = fmt.Sprintf("%s %s %d — Rs.%d", mk, md, year, price)
+	vd.caption = fmt.Sprintf("%s %s %d — RM%d", mk, md, year, price)
 	vd.photos = w.vehiclePhotosTx(ctx, tx, id, 6)
 	return vd, true
 }
@@ -196,7 +209,7 @@ func (w *Worker) matchItemsTx(ctx context.Context, tx pgx.Tx, matchIDs string, o
 		var id, make, model, fuel, trans string
 		var year, price int
 		if err := rows.Scan(&id, &make, &model, &year, &price, &fuel, &trans); err == nil {
-			byID[id] = matchItem{id: id, text: fmt.Sprintf("%s %s %d — Rs.%d (%s/%s)", make, model, year, price, fuel, trans)}
+			byID[id] = matchItem{id: id, text: fmt.Sprintf("%s %s %d — RM%d (%s/%s)", make, model, year, price, fuel, trans)}
 		}
 	}
 	rows.Close()

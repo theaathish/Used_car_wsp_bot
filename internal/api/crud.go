@@ -113,7 +113,28 @@ func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
 		limit = 100
 	}
 	offset := qInt(r, "offset", 0)
-	rows, err := s.Pool.Query(r.Context(), `SELECT id::text,make,model,year,price,fuel,transmission,km,status,description FROM vehicles ORDER BY created_at DESC LIMIT $1 OFFSET $2`, limit, offset)
+	// Optional filters for SDAS sheet: ?stock_status=FREESTOCK&q=218i&location=Ara
+	stockStatus := r.URL.Query().Get("stock_status")
+	q := r.URL.Query().Get("q")
+	conds := []string{}
+	args := []any{limit, offset}
+	if stockStatus != "" {
+		args = append(args, stockStatus)
+		conds = append(conds, `stock_status=$`+strconv.Itoa(len(args)))
+	}
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		conds = append(conds, `(make ILIKE $`+strconv.Itoa(len(args))+` OR model ILIKE $`+strconv.Itoa(len(args))+` OR model_description ILIKE $`+strconv.Itoa(len(args))+` OR reg_num ILIKE $`+strconv.Itoa(len(args))+` OR stock_no ILIKE $`+strconv.Itoa(len(args))+`)`)
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = " WHERE " + strings.Join(conds, " AND ")
+	}
+	rows, err := s.Pool.Query(r.Context(), `SELECT id::text,make,model,year,price,fuel,transmission,km,status,description,
+		COALESCE(stock_no,''),COALESCE(stock_location,''),COALESCE(model_code,''),COALESCE(model_description,''),
+		COALESCE(reg_num,''),COALESCE(chassis,''),COALESCE(colour,''),COALESCE(upholstery,''),
+		COALESCE(stock_status,''),COALESCE(warranty,''),COALESCE(claims,'')
+		FROM vehicles`+where+` ORDER BY created_at DESC LIMIT $1 OFFSET $2`, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
@@ -122,10 +143,14 @@ func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
 	out := []any{}
 	for rows.Next() {
 		var id, make, model, fuel, trans, status, desc string
+		var stockNo, stockLoc, modelCode, modelDesc, regNum, chassis, colour, uphol, stockStatus, warranty, claims string
 		var year, price, km int
-		_ = rows.Scan(&id, &make, &model, &year, &price, &fuel, &trans, &km, &status, &desc)
+		_ = rows.Scan(&id, &make, &model, &year, &price, &fuel, &trans, &km, &status, &desc,
+			&stockNo, &stockLoc, &modelCode, &modelDesc, &regNum, &chassis, &colour, &uphol, &stockStatus, &warranty, &claims)
 		imgs := s.vehicleImages(r, id)
-		out = append(out, map[string]any{"id": id, "make": make, "model": model, "year": year, "price": price, "fuel": fuel, "transmission": trans, "km": km, "status": status, "description": desc, "images": imgs})
+		out = append(out, map[string]any{"id": id, "make": make, "model": model, "year": year, "price": price, "fuel": fuel, "transmission": trans, "km": km, "status": status, "description": desc, "images": imgs,
+			"stock_no": stockNo, "stock_location": stockLoc, "model_code": modelCode, "model_description": modelDesc,
+			"reg_num": regNum, "chassis": chassis, "colour": colour, "upholstery": uphol, "stock_status": stockStatus, "warranty": warranty, "claims": claims})
 	}
 	writeJSON(w, out)
 }
@@ -149,16 +174,25 @@ func (s *Server) createVehicle(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Make, Model, Fuel, Transmission, Status, Description string
 		Year, Price, Km                                      int
+		StockNo, StockLocation, ModelCode, ModelDescription  string
+		RegNum, Chassis, OldRegNum, Purchaser, RegDate       string
+		Colour, Upholstery, StockStatus, Warranty, Claims    string
 	}
 	if err := readJSON(r, &in); err != nil || in.Make == "" || in.Model == "" {
 		http.Error(w, `{"error":"make+model required"}`, 400)
 		return
 	}
 	if in.Status == "" {
-		in.Status = "AVAILABLE"
+		// SDAS mapping: FREESTOCK->AVAILABLE, ALLOCATED->RESERVED
+		switch in.StockStatus {
+		case "ALLOCATED":
+			in.Status = "RESERVED"
+		default:
+			in.Status = "AVAILABLE"
+		}
 	}
-	if in.Status != "DRAFT" && in.Status != "AVAILABLE" {
-		http.Error(w, `{"error":"new vehicle must be DRAFT or AVAILABLE"}`, 400)
+	if in.Status != "DRAFT" && in.Status != "AVAILABLE" && in.Status != "RESERVED" {
+		http.Error(w, `{"error":"new vehicle must be DRAFT, AVAILABLE or RESERVED"}`, 400)
 		return
 	}
 	if in.Year < 0 || in.Price < 0 || in.Km < 0 {
@@ -170,8 +204,12 @@ func (s *Server) createVehicle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := uuid.NewString()
-	_, err := s.Pool.Exec(r.Context(), `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		id, in.Make, in.Model, in.Year, in.Price, in.Fuel, in.Transmission, in.Km, in.Status, in.Description)
+	_, err := s.Pool.Exec(r.Context(), `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description,
+		stock_no,stock_location,model_code,model_description,reg_num,chassis,old_reg_num,purchaser,reg_date,colour,upholstery,stock_status,warranty,claims)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+		ON CONFLICT DO NOTHING`,
+		id, in.Make, in.Model, in.Year, in.Price, in.Fuel, in.Transmission, in.Km, in.Status, in.Description,
+		in.StockNo, in.StockLocation, in.ModelCode, in.ModelDescription, in.RegNum, in.Chassis, in.OldRegNum, in.Purchaser, in.RegDate, in.Colour, in.Upholstery, in.StockStatus, in.Warranty, in.Claims)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
@@ -229,7 +267,8 @@ func (s *Server) patchVehicle(w http.ResponseWriter, r *http.Request) {
 			audit(r.Context(), s.Pool, actor, "vehicle.status", "vehicle", id, cur, st)
 		}
 	}
-	allowed := map[string]bool{"make": true, "model": true, "year": true, "price": true, "fuel": true, "transmission": true, "km": true, "status": true, "description": true}
+	allowed := map[string]bool{"make": true, "model": true, "year": true, "price": true, "fuel": true, "transmission": true, "km": true, "status": true, "description": true,
+		"stock_no": true, "stock_location": true, "model_code": true, "model_description": true, "reg_num": true, "chassis": true, "old_reg_num": true, "purchaser": true, "reg_date": true, "colour": true, "upholstery": true, "stock_status": true, "warranty": true, "claims": true}
 	for k, v := range in {
 		if !allowed[k] {
 			continue
@@ -245,6 +284,111 @@ func (s *Server) patchVehicle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// importVehicles bulk upserts SDAS stock rows by stock_no.
+// POST /api/vehicles/import [{"stock_no":"704775","stock_location":"Carsome","model_description":"BMW 218i Gran Coupe M Sport","model_code":"F44","yom":2021,"reg_num":"VGS9224","chassis":"...","colour":"Snapper Rocks Blue","upholstery":"Black","stock_status":"ALLOCATED","selling_price":90000,"mileage":76000,"warranty":"Remaining 5 Years Warranty","claims":"Rear minor impact",...}]
+// FREESTOCK->AVAILABLE, ALLOCATED->RESERVED. Blank fuel/transmission = wildcard in matching.
+func (s *Server) importVehicles(w http.ResponseWriter, r *http.Request) {
+	var rows []map[string]any
+	if err := readJSON(r, &rows); err != nil || len(rows) == 0 {
+		http.Error(w, `{"error":"non-empty JSON array required"}`, 400)
+		return
+	}
+	if len(rows) > 2000 {
+		http.Error(w, `{"error":"max 2000 rows per import"}`, 400)
+		return
+	}
+	str := func(m map[string]any, keys ...string) string {
+		for _, k := range keys {
+			if v, ok := m[k]; ok && v != nil {
+				if sv, ok := v.(string); ok {
+					return strings.TrimSpace(sv)
+				}
+				return strings.TrimSpace(fmt.Sprintf("%v", v))
+			}
+		}
+		return ""
+	}
+	num := func(m map[string]any, keys ...string) int {
+		for _, k := range keys {
+			if v, ok := m[k]; ok && v != nil {
+				switch n := v.(type) {
+				case float64:
+					return int(n)
+				case int:
+					return n
+				case string:
+					clean := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(n), ",", ""), " ", "")
+					if clean == "" || clean == "-" {
+						return 0
+					}
+					var iv int
+					_, _ = fmt.Sscan(clean, &iv)
+					if iv < 0 {
+						return 0
+					}
+					return iv
+				}
+			}
+		}
+		return 0
+	}
+	inserted, updated := 0, 0
+	for _, m := range rows {
+		stockNo := str(m, "stock_no", "STOCK NO", "stockNo")
+		if stockNo == "" {
+			continue
+		}
+		modelDesc := str(m, "model_description", "MODEL DESCRIPTION", "modelDescription")
+		make, model := splitMakeModel(modelDesc)
+		if make == "" {
+			continue
+		}
+		year := num(m, "yom", "YOM", "year")
+		price := num(m, "selling_price", "Selling Price", "price")
+		km := num(m, "mileage", "MILEAGE", "km")
+		stockStatus := strings.ToUpper(str(m, "stock_status", "STATUS", "status"))
+		status := "AVAILABLE"
+		if stockStatus == "ALLOCATED" {
+			status = "RESERVED"
+		}
+		desc := strings.TrimSpace(str(m, "model_description", "MODEL DESCRIPTION") + " " + str(m, "model_code", "MODEL CODE") + " " + str(m, "colour", "COLOUR") + " / " + str(m, "upholstery", "UPHOLSTERY"))
+		tag, err := s.Pool.Exec(r.Context(), `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description,
+			stock_no,stock_location,model_code,model_description,reg_num,chassis,old_reg_num,purchaser,reg_date,colour,upholstery,stock_status,warranty,claims)
+			VALUES($1,$2,$3,$4,$5,'','',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+			ON CONFLICT(stock_no) WHERE stock_no <> '' DO UPDATE SET make=EXCLUDED.make,model=EXCLUDED.model,year=EXCLUDED.year,price=EXCLUDED.price,
+			km=EXCLUDED.km,status=EXCLUDED.status,description=EXCLUDED.description,stock_location=EXCLUDED.stock_location,model_code=EXCLUDED.model_code,
+			model_description=EXCLUDED.model_description,reg_num=EXCLUDED.reg_num,chassis=EXCLUDED.chassis,old_reg_num=EXCLUDED.old_reg_num,
+			purchaser=EXCLUDED.purchaser,reg_date=EXCLUDED.reg_date,colour=EXCLUDED.colour,upholstery=EXCLUDED.upholstery,
+			stock_status=EXCLUDED.stock_status,warranty=EXCLUDED.warranty,claims=EXCLUDED.claims,updated_at=now()`,
+			uuid.NewString(), make, model, year, price, km, status, desc,
+			stockNo, str(m, "stock_location", "STOCK LOCATION"), str(m, "model_code", "MODEL CODE"), modelDesc,
+			str(m, "reg_num", "REG NUM"), str(m, "chassis", "CHASSIS"), str(m, "old_reg_num", "OLD REG NUM"),
+			str(m, "purchaser", "PURCHASER"), str(m, "reg_date", "REG DATE"), str(m, "colour", "COLOUR"),
+			str(m, "upholstery", "UPHOLSTERY"), stockStatus, str(m, "warranty", "Warranty"), str(m, "claims", "Claims/Remarks", "claims"))
+		if err != nil {
+			continue
+		}
+		if tag.RowsAffected() == 1 {
+			// INSERT ... ON CONFLICT DO UPDATE reports 1 row either way; distinguish via follow-up? count as upserted.
+			inserted++
+		} else {
+			updated++
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "upserted": inserted + updated, "rows": len(rows)})
+}
+
+func splitMakeModel(desc string) (string, string) {
+	parts := strings.Fields(strings.TrimSpace(desc))
+	if len(parts) == 0 {
+		return "", ""
+	}
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return parts[0], strings.Join(parts[1:], " ")
 }
 
 func (s *Server) uploadVehicleImage(w http.ResponseWriter, r *http.Request) {
