@@ -18,6 +18,7 @@ LOCATIONS = [
     "Ara Open Car Park", "Courtesy Bukit Jalil", "C&C Glenmarie", "PMM Damansara",
     "SDAS Tebrau", "SDAS Penang", "SDAS Lot 33", "SDAS Tebrau", "SDAS Ara",
     "SDAS CSL", "SDAS JB", "SDAS KL", "SDAS BK", "SDAS Ara", "SDAS CSL",
+    "SDAS CSL", "SDAS JB", "SDAS KL", "SDAS BK", "SDAS Ara", "SDAS CSL",
     "RATC ABAD", "CSL B&P", "AB Motorrad", "BYD TREC", "BYD Ara",
     "MINI Ara", "Volvo Ara", "Incoming Stock", "Carrocare", "Mzone",
     "Carsome", "ABBK", "ABKL", "ABAD", "JVC",
@@ -61,6 +62,7 @@ UPHOLSTERY_MULTI = {
     "Merino Black", "Merino Tartufo", "Merino Amarone",
     "Merino Smoke White", "Merino Copper Brown", "Merino Silverstone",
     "Merino Marina Blue", "Merino Deep Lagoon", "Merino Dark Truffle",
+    "Leather Tartufo",
     "Merino Copper Brown / Atlas Grey", "Merino Silverstone / Atlas Grey",
     "Vescin Dark Petrol", "Vescin Nightshade Blue", "Vescin Vintage Brown",
     "Vescin Petrol Dark",
@@ -94,6 +96,8 @@ WARRANTIES = [
     "As It Is Basis",
     "No manufacturing warranty, FOC 3 years GMR warranty + FOC 1 time Drivecare Service",
     "FOC 2 Years SDAS EWP + FOC 1 time Drivecare Service",
+    "Optional to Purchase SDAS EWP + RM2,000 Diesel e-Voucher + FOC 1 time Drivecare Service",
+    "Refer to service booklet + RM2,000 Diesel e-Voucher",
     "With 1 Year C&C Extended Warranty",
     "Refer to service booklet",
     "Refer to Motorrad",
@@ -137,23 +141,21 @@ def parse_line(line, lineno):
     toks = left.split()
     if not toks:
         return ("reject", f"line {lineno}: empty left")
-    # Stock no (or Incoming Stock without number).
+    # Stock no (or rows without one: location-first, or Incoming Stock).
+    stock_no, pos, location = "", 0, ""
     if toks[0] == "Incoming" and len(toks) > 1 and toks[1] == "Stock":
-        stock_no, pos = "", 2
+        pos = 2
         location = "Incoming Stock"
     elif toks[0][0].isdigit():
         stock_no, pos = toks[0], 1
-        location = ""
-        for loc in LOCATIONS:
-            parts = loc.split()
-            if toks[pos: pos + len(parts)] == parts:
-                location = loc
-                pos += len(parts)
-                break
-        if not location:
-            return ("reject", f"line {lineno}: unknown location after {stock_no}")
-    else:
-        return ("reject", f"line {lineno}: bad start: {toks[0]}")
+    for loc in LOCATIONS:
+        parts = loc.split()
+        if toks[pos: pos + len(parts)] == parts:
+            location = loc
+            pos += len(parts)
+            break
+    if not location:
+        return ("reject", f"line {lineno}: unknown location at: {' '.join(toks[pos:pos+3])}")
 
     # Brand + model description up to MODEL_CODE/YOM.
     brand = ""
@@ -165,12 +167,14 @@ def parse_line(line, lineno):
             break
     if not brand:
         return ("reject", f"line {lineno}: unknown brand at: {' '.join(toks[pos:pos+4])}")
+    # YOM anchor: first 4-digit year whose PREVIOUS token is the model code
+    # (model names like Peugeot 2008 contain year-like numbers).
     yi = None
     for j in range(pos, len(toks)):
-        if YEAR_RE.match(toks[j]):
+        if YEAR_RE.match(toks[j]) and j - pos >= 2 and CODE_RE.match(toks[j - 1]):
             yi = j
             break
-    if yi is None or yi - pos < 2:
+    if yi is None:
         return ("reject", f"line {lineno}: no YOM/model code")
     model_code = toks[yi - 1]
     if not CODE_RE.match(model_code):
@@ -181,18 +185,27 @@ def parse_line(line, lineno):
         return ("reject", f"line {lineno}: bad YOM {yom}")
     pos = yi + 1
 
-    # REG NUM [+CHASSIS merged], CHASSIS, OLD REG, [PURCHASER], DATE, MILEAGE.
+    # REG NUM [+CHASSIS merged], ["(Num Retain)"], CHASSIS, OLD REG, [PURCHASER], DATE, MILEAGE.
+    reg_num = chassis = None
     if pos < len(toks) and len(toks[pos]) > 10:
         nxt = toks[pos + 1] if pos + 1 < len(toks) else ""
         reg_num, chassis = split_merged_reg(toks[pos], nxt)
         if reg_num is None:
             return ("reject", f"line {lineno}: bad merged reg/chassis")
         pos += 1
-    else:
+    if reg_num is None:
         if pos + 1 >= len(toks):
             return ("reject", f"line {lineno}: truncated reg/chassis")
-        reg_num, chassis = toks[pos], toks[pos + 1]
-        pos += 2
+        reg_num = toks[pos]
+        pos += 1
+        while pos < len(toks) and toks[pos].startswith("("):
+            while pos < len(toks) and not toks[pos].endswith(")"):
+                pos += 1
+            pos += 1  # skip "(Num Retain)" style parentheticals
+        if pos >= len(toks):
+            return ("reject", f"line {lineno}: truncated chassis")
+        chassis = toks[pos]
+        pos += 1
     if pos >= len(toks):
         return ("reject", f"line {lineno}: truncated old reg")
     old_reg = toks[pos]
@@ -223,7 +236,9 @@ def parse_line(line, lineno):
     if upholstery == "Balck":
         upholstery = "Black"
     if not stock_no:
-        stock_no = "INCOMING-" + reg_num
+        if not reg_num:
+            return ("reject", f"line {lineno}: no stock_no and no reg_num")
+        stock_no = ("INCOMING-" if location == "Incoming Stock" else "NOSTOCK-") + reg_num
     return ("ok", {
         "stock_no": stock_no, "stock_location": location,
         "model_description": model_desc, "model_code": "" if model_code == "-" else model_code,
