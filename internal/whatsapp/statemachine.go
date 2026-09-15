@@ -466,6 +466,15 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		return nxt, "Noted budget. "+promptFor(nxt), "BUY", "QUALIFIED", patch
 	case "BUY_BRAND":
+		if b == "" || b == "any" || b == "no" {
+			patch["brand"] = "ANY"
+			merged := merge(data, patch)
+			nxt := nextMissingBuy(merged)
+			if nxt == "BUY_RESULTS" {
+				return nxt, "Thanks! Let me find matching cars for you...", "BUY", "QUALIFIED", patch
+			}
+			return nxt, promptFor(nxt), "BUY", "QUALIFIED", patch
+		}
 		// Out-of-order: "petrol" at brand step means fuel, not a brand.
 		if f := findFuel(body); f != "" {
 			patch["fuel"] = f
@@ -485,9 +494,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			}
 			return "BUY_BRAND", "Which brand? (e.g. BMW, MINI, Audi, or *any*)", "BUY", "QUALIFIED", patch
 		}
-		if b == "" || b == "any" || b == "no" {
-			patch["brand"] = "ANY"
-		} else if br, mo := extractBrandModel(body); br != "" && mo != "" {
+		if br, mo := extractBrandModel(body); br != "" && mo != "" {
 			patch["brand"] = br // "BMW X1" in brand step fills both
 			patch["model"] = mo
 		} else if br, _ := extractBrandModel(body); br != "" {

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -92,6 +93,9 @@ func (w *Worker) vehiclePhotoJobs(relPaths []string, caption string, max int) []
 }
 
 func (w *Worker) vehiclePhotosTx(ctx context.Context, tx pgx.Tx, vehicleID string, limit int) []string {
+	if _, err := uuid.Parse(vehicleID); err != nil {
+		return nil // never let a bad id abort the tx (25P02 -> 500)
+	}
 	rows, err := tx.Query(ctx, `SELECT path FROM vehicle_images WHERE vehicle_id=$1 ORDER BY sort_order LIMIT $2`, vehicleID, limit)
 	if err != nil {
 		return nil
@@ -124,6 +128,9 @@ func (w *Worker) vehicleDetails(ctx context.Context, tx pgx.Tx, matchIDs string,
 // vehicleByID loads one vehicle card (SDAS fields appended when present).
 func (w *Worker) vehicleByID(ctx context.Context, tx pgx.Tx, id string) (vehicleDetail, bool) {
 	var vd vehicleDetail
+	if _, err := uuid.Parse(id); err != nil {
+		return vd, false
+	}
 	var mk, md, fuel, trans, desc, status string
 	var stockNo, stockLoc, regNum, colour, stockStatus, warranty, claims string
 	var year, price, km int
@@ -189,7 +196,9 @@ func (w *Worker) matchItemsTx(ctx context.Context, tx pgx.Tx, matchIDs string, o
 	var clean []string
 	for _, id := range ids {
 		if id = strings.TrimSpace(id); id != "" {
-			clean = append(clean, id)
+			if _, err := uuid.Parse(id); err == nil {
+				clean = append(clean, id)
+			}
 		}
 	}
 	if offset >= len(clean) {

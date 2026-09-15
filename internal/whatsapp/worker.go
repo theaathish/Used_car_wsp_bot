@@ -999,7 +999,11 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 				if data["match_ids"] == "" {
 					total = 0
 				}
-				reply = "That number isn't on the list. Reply a number 1–" + strconv.Itoa(total) + ", *more cars*, or *test drive*."
+				if total == 0 {
+					reply = "No cars in your list yet. Tell me your budget and brand, or reply *more cars* and our team will call with fresh arrivals."
+				} else {
+					reply = "That number isn't on the list. Reply a number 1–" + strconv.Itoa(total) + ", *more cars*, or *test drive*."
+				}
 			}
 		} else if patch["more_photos"] != "" {
 			vid := data["selected_vehicle"]
@@ -1009,8 +1013,10 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 					vid = strings.TrimSpace(ids[0])
 				}
 			}
-			photos := w.vehiclePhotosTx(ctx, tx, vid, 6)
-			if len(photos) == 0 {
+			if _, err := uuid.Parse(vid); err != nil {
+				reply = "No photos uploaded for this car yet — our team will share them on call. Reply *YES* to confirm interest or *test drive* to visit."
+				vid = ""
+			} else if photos := w.vehiclePhotosTx(ctx, tx, vid, 6); len(photos) == 0 {
 				reply = "No photos uploaded for this car yet — our team will share them on call. Reply *YES* to confirm interest or *test drive* to visit."
 			} else {
 				cap_ := ""
@@ -1079,10 +1085,10 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			atoi(data["sell_km"]), data["sell_fuel"], data["sell_trans"], data["sell_specs"], data["sell_location"], atoi(data["sell_photos"]))
 	}
 
-	// Finance enquiry captured
+	// Finance enquiry captured (income is INT: use 0, never '').
 	if fr, ok := data["finance_raw"]; ok && fr != "" && next == "DONE" {
 		_, _ = tx.Exec(ctx, `INSERT INTO finance_requests(lead_id,loan_amount,tenure_months,employment,income,status)
-			SELECT $1,0,0,'','', 'NEW' WHERE NOT EXISTS (SELECT 1 FROM finance_requests WHERE lead_id=$1)`, leadID)
+			SELECT $1,0,0,'',0, 'NEW' WHERE NOT EXISTS (SELECT 1 FROM finance_requests WHERE lead_id=$1)`, leadID)
 	}
 
 	// Test-drive details arrived: book a real slot when possible, otherwise

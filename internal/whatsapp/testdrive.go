@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -182,6 +183,9 @@ func candidatesTx(ctx context.Context, tx pgx.Tx, matchIDs string) []tdVehicle {
 	for _, id := range strings.Split(matchIDs, ",") {
 		if id = strings.TrimSpace(id); id == "" {
 			continue
+		}
+		if _, err := uuid.Parse(id); err != nil {
+			continue // never let a bad id abort the tx
 		}
 		var c tdVehicle
 		if err := tx.QueryRow(ctx, `SELECT id::text, make, model FROM vehicles WHERE id=$1 AND status='AVAILABLE'`, id).Scan(&c.id, &c.make, &c.model); err == nil {
