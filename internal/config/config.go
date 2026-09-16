@@ -24,7 +24,7 @@ func Load() Config {
 		DataDir:      envOr("DATA_DIR", "./data"),
 		SeedEmail:    envOr("ADMIN_SEED_EMAIL", "admin@local.test"),
 		SeedPassword: envOr("ADMIN_SEED_PASSWORD", "admin123"),
-		Timezone:     envOr("TIMEZONE", "Asia/Kolkata"),
+		Timezone:     envOr("TIMEZONE", "Asia/Kuala_Lumpur"),
 	}
 	c.WhatsappEnabled = envBool("WHATSAPP_ENABLED", true)
 	return c

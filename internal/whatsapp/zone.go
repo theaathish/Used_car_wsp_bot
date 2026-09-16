@@ -12,7 +12,7 @@ import (
 var (
 	zoneMu sync.RWMutex
 	zone   = time.FixedZone("IST", 5*3600+1800)
-	zoneName = "Asia/Kolkata"
+	zoneName = "Asia/Kuala_Lumpur"
 )
 
 // SetZone switches the business timezone (validates via time/tzdata).

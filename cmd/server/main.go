@@ -70,7 +70,7 @@ func main() {
 	}
 	if _, err := whatsapp.SetZone(zoneName); err != nil {
 		log.Printf("bad timezone %q, using IST: %v", zoneName, err)
-		whatsapp.SetZone("Asia/Kolkata")
+		whatsapp.SetZone("Asia/Kuala_Lumpur")
 	} else {
 		log.Printf("business timezone: %s", whatsapp.ZoneName())
 	}
