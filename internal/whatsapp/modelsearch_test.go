@@ -93,3 +93,51 @@ func TestModelSearchGuard(t *testing.T) {
 		t.Fatalf("both: %q", s)
 	}
 }
+
+func TestBudgetSkipKeepsFind(t *testing.T) {
+	banked := map[string]string{"brand": "BMW", "model": "C400GT", "year_min": "2025"}
+
+	// iPhone curly apostrophe counts as "don't know"
+	if !unknownBudget(norm("don’t know")) {
+		t.Fatal("curly don’t know must skip budget")
+	}
+	ns, _, _, _, patch := Next("BUY_BUDGET", "don’t know", copyMap(banked))
+	if ns != "BUY_FUEL" || patch["budget_unknown"] != "1" {
+		t.Fatalf("curly skip: got %s %+v, want BUY_FUEL", ns, patch)
+	}
+
+	// "0" skip keeps the banked find instead of re-asking brand
+	data := copyMap(banked)
+	ns, reply, _, _, patch := Next("BUY_BUDGET", "0", data)
+	for k, v := range patch {
+		data[k] = v
+	}
+	if ns != "BUY_FUEL" {
+		t.Fatalf("skip with banked find: got %s (%q), want BUY_FUEL", ns, reply)
+	}
+	if data["brand"] != "BMW" || data["model"] != "C400GT" {
+		t.Fatalf("banked find wiped: %+v", data)
+	}
+
+	// fresh "0" still goes to brand
+	ns, _, _, _, patch = Next("BUY_BUDGET", "0", map[string]string{})
+	if ns != "BUY_BRAND" || patch["budget_unknown"] != "1" {
+		t.Fatalf("fresh skip: got %s %+v", ns, patch)
+	}
+
+	// space-insensitive model: typed C400GT finds stored "C 400 GT"
+	if !strings.Contains(nospace("C 400 GT"), nospace("c400gt")) {
+		t.Fatal("nospace model match broken")
+	}
+	if strings.Contains(nospace("C 400 GT"), nospace("218i")) {
+		t.Fatal("nospace must not over-match unrelated models")
+	}
+}
+
+func copyMap(m map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}

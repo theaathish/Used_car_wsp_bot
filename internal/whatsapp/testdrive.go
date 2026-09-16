@@ -50,15 +50,16 @@ func parseTestDrive(body string, candidates []tdVehicle, now time.Time) tdResult
 			r.vehicleID = candidates[n-1].id
 		}
 	} else {
+		nb := nospace(b)
 		for _, c := range candidates {
-			if c.model != "" && c.model != "ANY" && strings.Contains(b, strings.ToLower(c.model)) {
+			if c.model != "" && c.model != "ANY" && strings.Contains(nb, nospace(c.model)) {
 				r.vehicleID = c.id
 				break
 			}
 		}
 		if r.vehicleID == "" {
 			for _, c := range candidates {
-				if c.make != "" && c.make != "ANY" && strings.Contains(b, strings.ToLower(c.make)) {
+				if c.make != "" && c.make != "ANY" && strings.Contains(nb, nospace(c.make)) {
 					r.vehicleID = c.id
 					break
 				}

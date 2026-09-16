@@ -1419,7 +1419,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 			return false, 0
 		}
 		score += 2
-		if model != "" && model != "any" && !strings.Contains(strings.ToLower(c.model), model) {
+		if model != "" && model != "any" && !strings.Contains(nospace(c.model), nospace(model)) {
 			return false, 0
 		}
 		if model != "" && model != "any" {
@@ -1471,7 +1471,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 			continue
 		}
 		score := 0
-		if model != "" && model != "any" && strings.Contains(strings.ToLower(c.model), model) {
+		if model != "" && model != "any" && strings.Contains(nospace(c.model), nospace(model)) {
 			score += 4 // same model family first (e.g. other C400GT years)
 		}
 		if brand != "" && brand != "any" && strings.Contains(strings.ToLower(c.make), brand) {

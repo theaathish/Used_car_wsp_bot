@@ -89,7 +89,17 @@ func ParseBudget(s string) (int, int) {
 	return a, b
 }
 
-func norm(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
+func norm(s string) string {
+	// Smart quotes from phone keyboards (iPhone "don't") fold to ASCII so
+	// phrase matching (unknownBudget, greetings) works on real devices.
+	s = strings.ReplaceAll(s, "’", "'")
+	s = strings.ReplaceAll(s, "‘", "'")
+	return strings.TrimSpace(strings.ToLower(s))
+}
+
+// nospace lowers and strips spaces for model matching: "C400GT" finds
+// stored "C 400 GT" and vice versa.
+func nospace(s string) string { return strings.ReplaceAll(strings.ToLower(s), " ", "") }
 
 // isGreetingOnly reports a bare greeting ("hi", "hello!", "vanakkam").
 // Unlike isGreeting (prefix/suffix match), this never fires on longer
@@ -464,7 +474,7 @@ func nextMissingBuy(data map[string]string) string {
 func promptFor(state string) string {
 	switch state {
 	case "BUY_BUDGET":
-		return "What's your budget? (e.g. RM 90,000, 100-200k, or reply *don't know*)"
+		return "What's your budget? (e.g. RM 90,000, 100-200k, or *0* to skip)"
 	case "BUY_BRAND":
 		return "Which brand? Reply the name, or *0* for any (e.g. Maruti, Hyundai, BMW, 0)"
 	case "BUY_MODEL":
@@ -583,7 +593,18 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case "BUY_BUDGET":
 		if unknownBudget(body) || parseChoice(body) == 0 {
 			patch["budget_unknown"] = "1"
-			return "BUY_BRAND", "No worries! Our sales team can help with budget. Meanwhile — which brand do you prefer? (name or *0* for any)", "BUY", "QUALIFIED", patch
+			// Skip only what is still missing: earlier answers (brand /
+			// model / year banked from a message like "BMW C400GT 2025")
+			// are kept, never re-asked or wiped.
+			merged := merge(data, patch)
+			nxt := nextMissingBuy(merged)
+			if nxt == "BUY_RESULTS" {
+				return nxt, "Thanks! Let me find matching cars for you...", "BUY", "QUALIFIED", patch
+			}
+			if nxt == "BUY_BRAND" {
+				return nxt, "No worries! Our sales team can help with budget. Meanwhile — which brand do you prefer? (name or *0* for any)", "BUY", "QUALIFIED", patch
+			}
+			return nxt, "Noted — no budget filter. " + promptFor(nxt), "BUY", "QUALIFIED", patch
 		}
 		// multi-field single message (BUY-009) + interruption-safe (INT-001):
 		// bank every structured hint; a short lettered message with no
