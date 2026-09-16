@@ -476,8 +476,30 @@ func (w *Worker) onEvent(evt any) {
 	}
 	body := messageText(m.Message)
 	if body == "" {
-		log.Printf("[whatsapp] ignored empty-text from %s chat=%s type=%s (need unwrap support?)", phone, m.Info.Chat.String(), messageKind(m.Message))
-		return
+		// Never go silent on a real human message: voice notes, videos
+		// and documents without captions carry no text, so they flow
+		// through the state machine as a labelled placeholder and get
+		// the current step re-asked instead of nothing at all.
+		switch messageKind(m.Message) {
+		case "audio/ptt":
+			body = "[voice message]"
+		case "video":
+			body = "[video]"
+		case "document":
+			body = "[document]"
+		case "image":
+			body = "[photo]"
+		case "location":
+			body = "[location]"
+		case "contact":
+			body = "[contact]"
+		case "sticker", "reaction":
+			return // reactions/stickers stay silent by design
+		default:
+			log.Printf("[whatsapp] ignored empty-text from %s chat=%s type=%s", phone, m.Info.Chat.String(), messageKind(m.Message))
+			return
+		}
+		log.Printf("[whatsapp] non-text %s from %s treated as %s", messageKind(m.Message), phone, body)
 	}
 	reply, err := w.HandleInbound(context.Background(), phone, name, body, waID)
 	if err != nil {
@@ -762,7 +784,11 @@ func (w *Worker) SendToJID(ctx context.Context, jid types.JID, phone, text strin
 	st := w.status
 	w.mu.RUnlock()
 	if !w.enabled || cli == nil || st != "connected" {
-		log.Printf("[whatsapp:stub] -> %s (%s): %s", phone, jid.String(), text)
+		// Queue instead of dropping: the reply is delivered by FlushOutbox
+		// on reconnect. (Flow-bug: stubbed replies were logged only, so the
+		// admin saw SENT while the human got nothing.)
+		_, _ = w.pool.Exec(ctx, `INSERT INTO outbox(phone,body,status) VALUES($1,$2,'PENDING') ON CONFLICT DO NOTHING`, phone, text)
+		log.Printf("[whatsapp:stub-queued] -> %s (%s): %s", phone, jid.String(), text)
 		return nil
 	}
 	_, err := cli.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(text)})
@@ -948,6 +974,14 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			}
 			return reply, nil
 		}
+		// No step to go back to (e.g. double "back"): stay put instead of
+		// storing "back" as an answer like brand or model.
+		reply := "You're already at the start of this step. " + promptFor(state)
+		_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
+		return reply, nil
 	}
 
 	// P0-13: explicit intent switch mid-flow restarts cleanly into the new flow.
@@ -1076,8 +1110,11 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		}
 	}
 
-	// SELL done -> valuation handoff row (idempotent per lead)
-	if next == "DONE" && intent == "SELL" {
+	// SELL done -> valuation handoff row (idempotent per lead). Guarded by
+	// prevState so a hijacked DONE (e.g. finance keyword mid-sell, now
+	// scoped out above, or any future global) can never file a junk
+	// VALUATION_PENDING row from a half-filled form.
+	if prevState == "SELL_PHOTOS" && next == "DONE" && intent == "SELL" {
 		_, _ = tx.Exec(ctx, `INSERT INTO sell_requests(lead_id,brand,model,year,registration,km,fuel,transmission,condition,location,photo_count,status)
 			SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'VALUATION_PENDING'
 			WHERE NOT EXISTS (SELECT 1 FROM sell_requests WHERE lead_id=$1)`,

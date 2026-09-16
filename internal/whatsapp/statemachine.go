@@ -18,6 +18,16 @@ var transmissions = []string{"automatic", "manual", "amt", "cvt", "dct"}
 // maxModelYear caps year input at next calendar year (BUY-107).
 func maxModelYear() int { return time.Now().Year() + 1 }
 
+// isYearLike reports a bare 4-digit year (also matches numeric model names
+// like "2008", which the model step accepts on retry once year is known).
+func isYearLike(s string) bool {
+	clean := strings.ReplaceAll(strings.TrimSpace(s), ",", "")
+	if v, err := strconv.Atoi(clean); err == nil && v >= 1990 && v <= maxModelYear() {
+		return true
+	}
+	return false
+}
+
 // ParseBudget extracts min/max from free text like "5 lakh", "5l",
 // "500000", "3-6 lakh", "₹15,00,000", "RM 90,000", "RM150k", "100-200k".
 // Returns 0,0 when absent or invalid so callers reprompt.
@@ -241,6 +251,9 @@ func extractBrandModel(body string) (string, string) {
 		if stop[wd] {
 			continue
 		}
+		if strings.HasPrefix(wd, "[") {
+			continue // media placeholders like [video] are never brand/model
+		}
 		if _, err := strconv.Atoi(strings.ReplaceAll(wd, ",", "")); err == nil {
 			continue // pure numbers are budget, never brand/model
 		}
@@ -286,6 +299,9 @@ func stripKnown(body string) string {
 		lw := strings.ToLower(strings.Trim(o, ".,!?₹"))
 		if lw == "" || known[lw] {
 			continue
+		}
+		if strings.HasPrefix(lw, "[") {
+			continue // media placeholders like [video] are never model names
 		}
 		if regexp.MustCompile(`^\d+$`).MatchString(lw) {
 			continue // pure numbers are budget/year, not model names
@@ -358,16 +374,22 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	}
 	b := norm(body)
 
+	// sellFlow/exchangeFlow guard the global shortcuts below: a word like
+	// "loan" or "more cars" inside a SELL/EXCHANGE answer must not hijack
+	// the flow (flow-bug: partial sell data + hijacked state).
+	sellFlow := strings.HasPrefix(state, "SELL_")
+	exchangeFlow := strings.HasPrefix(state, "EXCHANGE_")
+
 	// Global commands valid in any post-match state.
 	switch {
-	case strings.Contains(b, "more") && strings.Contains(b, "car"):
+	case strings.Contains(b, "more") && strings.Contains(b, "car") && !sellFlow && !exchangeFlow:
 		patch["page"] = "next"
 		return "BUY_RESULTS", "Showing more cars for you...", "", "", patch
 	case (strings.Contains(b, "more photo") || strings.Contains(b, "all photo") || strings.Contains(b, "send photo") || b == "photos" || b == "photo") && state == "BUY_RESULTS":
 		patch["more_photos"] = "1"
 		return "BUY_RESULTS", "Sending all photos...", "", "", patch
-	case strings.Contains(b, "finance") || strings.Contains(b, "loan") || strings.Contains(b, "emi"):
-		return "FINANCE_INFO", "We offer loan assistance through partner banks. Reply with: loan amount, tenure (months), employment type and monthly income — e.g. *5 lakh, 60 months, salaried, 80000*. Our finance team will call you. (No payment is taken on WhatsApp.)", "", "FOLLOWUP", patch
+	case (strings.Contains(b, "finance") || strings.Contains(b, "loan") || strings.Contains(b, "emi")) && !sellFlow && !exchangeFlow:
+		return "FINANCE_INFO", "We offer loan assistance through partner banks. Reply with: loan amount, tenure (months), employment type and monthly income — e.g. *RM 200,000, 60 months, salaried, 80000*. Our finance team will call you. (No payment is taken on WhatsApp.)", "", "FOLLOWUP", patch
 	case strings.Contains(b, "not interested") || strings.Contains(b, "not intrested") || strings.Contains(b, "no thanks") || strings.Contains(b, "drop"):
 		patch["interest"] = "NOT_INTERESTED"
 		return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY*, *SELL* or *EXCHANGE* anytime.", "", "LOST", patch
@@ -380,7 +402,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case (b == "yes" || b == "yeah" || b == "yep" || b == "yes i like it" || strings.HasPrefix(b, "confirm")) && state == "BUY_RESULTS":
 		patch["interest"] = "INTERESTED"
 		return state, "Confirmed! Our salesperson will call you shortly to take it forward. You can also ask for a *test drive* with date/time.", "", "QUALIFIED", patch
-	case strings.Contains(b, "test") && strings.Contains(b, "drive"):
+	case strings.Contains(b, "test") && strings.Contains(b, "drive") && !sellFlow && !exchangeFlow:
 		return "TESTDRIVE_ASK", "To book a test drive, reply with the car number or name plus day and time — e.g. *1, tomorrow 10am* or *Swift, Saturday 4pm*. Our team confirms the slot.", "", "TEST_DRIVE", patch
 	}
 
@@ -441,10 +463,15 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			switch {
 			case data["brand"] == "" && patch["brand"] == "":
 				patch["brand"] = br
-				if mo != "" && data["model"] == "" && patch["model"] == "" {
+				// "BMW 150k": the model slot must never hold a budget
+				// figure, or matching silently returns nothing later.
+				if mo != "" && !hasBudget(mo) && data["model"] == "" && patch["model"] == "" {
 					patch["model"] = mo
 				}
 			case data["model"] == "" && patch["model"] == "":
+				if hasBudget(strings.TrimSpace(br + " " + mo)) {
+					break
+				}
 				patch["model"] = strings.TrimSpace(br + " " + mo)
 			}
 		}
@@ -454,7 +481,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 				nxt := nextMissingBuy(merged)
 				return nxt, "Got it — I'll come back to budget later. "+promptFor(nxt), "BUY", "QUALIFIED", patch
 			}
-			return "BUY_BUDGET", "I didn't catch the budget. Try e.g. *4 lakh*, *3-5 lakh*, or reply *don't know*.", "BUY", "QUALIFIED", patch
+			return "BUY_BUDGET", "I didn't catch the budget. Try e.g. *RM 90,000*, *100-200k*, or reply *don't know*.", "BUY", "QUALIFIED", patch
 		}
 		merged := merge(data, patch)
 		nxt := nextMissingBuy(merged)
@@ -526,6 +553,11 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			patch["model"] = "ANY"
 		} else if rem := stripKnown(body); rem != "" {
 			patch["model"] = rem
+		} else if data["year_min"] != "" && isYearLike(body) {
+			// Numeric model names (e.g. Peugeot 2008) are swallowed as a
+			// year on first pass; once the year is known, accept the retry
+			// as the model instead of looping the question forever.
+			patch["model"] = strings.TrimSpace(body)
 		} else {
 			return "BUY_MODEL", "Saved that. Which model exactly? (e.g. Swift, Creta, X1, or *any*)", "BUY", "QUALIFIED", patch
 		}
@@ -655,17 +687,12 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		if n, err := strconv.Atoi(data["sell_photos"]); err == nil && n >= 10 {
 			return "SELL_PHOTOS", "10 photos are enough, thank you! Reply *DONE* and we'll proceed to valuation.", "SELL", "QUALIFIED", patch
 		}
-		if v, ok := data["sell_photos"]; ok && v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				patch["sell_photos"] = strconv.Itoa(n + 1)
-			}
-		} else {
-			patch["sell_photos"] = "1"
-		}
-		return "SELL_PHOTOS", "Photo noted (reply *DONE* when finished, or keep sending).", "SELL", "QUALIFIED", patch
+		// Plain text is never a photo: only HandleMedia counts photos.
+		// (Flow-bug: every typed word inflated sell_photos before.)
+		return "SELL_PHOTOS", "Please send car photos here on WhatsApp (front, rear, side, interior, dashboard, tyres). Reply *DONE* after sending.", "SELL", "QUALIFIED", patch
 	case "EXCHANGE_CURRENT":
 		patch["exchange_current"] = strings.TrimSpace(body)
-		return "EXCHANGE_WANT", "What new car are you looking for? (budget + brand, e.g. Creta under 10 lakh)", "EXCHANGE", "QUALIFIED", patch
+		return "EXCHANGE_WANT", "What new car are you looking for? (budget + brand, e.g. Creta under RM 200,000)", "EXCHANGE", "QUALIFIED", patch
 	case "EXCHANGE_WANT":
 		patch["exchange_want"] = strings.TrimSpace(body)
 		for k, v := range ExtractAll(body) {

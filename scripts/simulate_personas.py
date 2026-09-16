@@ -44,6 +44,22 @@ PERSONAS = [
     ("10/Drop-off + Restart", "60110000020", [
         "hi", "BUY", "80000", "not interested", "BUY", "RM 100000",
     ]),
+    ("11/Double-Back", "60110000021", [
+        "hi", "BUY", "RM 100000", "back", "back", "BMW", "any", "any", "any", "any",
+    ]),
+    ("12/Sell Chatter (text is not photos)", "60110000022", [
+        "hi", "SELL", "Swift VDI", "2018, MH12AB1234, 55000km",
+        "Diesel, Manual, Good, Pune", "hello?", "what now", "DONE",
+    ]),
+    ("13/More-Cars During Sell (no hijack)", "60110000023", [
+        "hi", "SELL", "Swift VDI", "more cars",
+    ]),
+    ("14/Loan-During-Sell (no hijack)", "60110000024", [
+        "hi", "SELL", "Swift VDI", "2018, MH12AB1234, 55000km", "I need a loan",
+    ]),
+    ("15/Budget-Model Junk (BMW 150k)", "60110000025", [
+        "hi", "BUY", "BMW 150k", "any", "any", "any", "any",
+    ]),
 ]
 
 EXPECTED = {
@@ -57,6 +73,11 @@ EXPECTED = {
     "60110000018": ["starting fresh", "Which car do you want to sell", "you want to *BUY*"],
     "60110000019": ["take your time", "follow up"],
     "60110000020": ["No problem", "What's your budget"],
+    "60110000021": ["already at the start", "Which model"],
+    "60110000022": ["send car photos", "VALUATION_PENDING"],
+    "60110000023": ["manufacturing year"],
+    "60110000024": ["send car photos"],
+    "60110000025": ["Top picks"],
 }
 
 def api(base, path, token, payload):
