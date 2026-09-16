@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -169,6 +170,20 @@ func (w *Worker) phoneLock(phone string) *sync.Mutex {
 		w.locks[phone] = &sync.Mutex{}
 	}
 	return w.locks[phone]
+}
+
+// sessionTimeout bounds one chat session: 30 min without activity closes
+// the open conversation, so a later "hi" starts fresh instead of resuming
+// stale state (e.g. yesterday's BUY_RESULTS). Tune here, no redeploy of
+// prompts needed.
+const sessionTimeout = 30 * time.Minute
+
+// isSessionExpired reports whether the last activity is older than the timeout.
+func isSessionExpired(updatedAt, now time.Time) bool {
+	if updatedAt.IsZero() {
+		return false
+	}
+	return now.Sub(updatedAt) > sessionTimeout
 }
 
 // validStates guards against corrupt state (STATE-004: recover, never crash).
@@ -896,21 +911,33 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		_, _ = tx.Exec(ctx, `UPDATE customers SET name=$1, updated_at=now() WHERE id=$2 AND (name='' OR name=$3)`, name, custID, phone)
 	}
 
-	// open conversation (STATE-007: human takeover flag)
+	// open conversation (STATE-007: human takeover flag). Idle past the
+	// session timeout closes the stale chat so the next message starts new.
 	var convID string
 	var botEnabled = true
-	err = tx.QueryRow(ctx, `SELECT id::text, bot_enabled FROM conversations WHERE customer_id=$1 AND status='open' ORDER BY created_at DESC LIMIT 1`, custID).Scan(&convID, &botEnabled)
+	var convUpdated time.Time
+	err = tx.QueryRow(ctx, `SELECT id::text, bot_enabled, updated_at FROM conversations WHERE customer_id=$1 AND status='open' ORDER BY created_at DESC LIMIT 1`, custID).Scan(&convID, &botEnabled, &convUpdated)
+	freshSession := false
 	if err != nil {
 		convID = uuid.NewString()
 		if _, err := tx.Exec(ctx, `INSERT INTO conversations(id,customer_id,channel,status) VALUES($1,$2,'whatsapp','open')`, convID, custID); err != nil {
 			return "", err
 		}
+		freshSession = true
+	} else if isSessionExpired(convUpdated, time.Now()) {
+		log.Printf("[whatsapp] session timeout for %s (idle since %s), closing", phone, convUpdated.Format(time.RFC3339))
+		_, _ = tx.Exec(ctx, `UPDATE conversations SET status='closed', updated_at=now() WHERE id=$1`, convID)
+		convID = uuid.NewString()
+		if _, err := tx.Exec(ctx, `INSERT INTO conversations(id,customer_id,channel,status) VALUES($1,$2,'whatsapp','open')`, convID, custID); err != nil {
+			return "", err
+		}
+		freshSession = true
 	}
-	// lead (latest non-terminal)
+	// lead (latest non-terminal; a fresh session always starts a new lead)
 	var leadID, state, intent, status, interest string
 	var stateRaw []byte
 	err = tx.QueryRow(ctx, `SELECT id::text, state, intent, status, COALESCE(interest,''), state_data FROM leads WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1`, custID).Scan(&leadID, &state, &intent, &status, &interest, &stateRaw)
-	if err != nil || status == "DONE" || status == "LOST" {
+	if err != nil || freshSession || status == "DONE" || status == "LOST" {
 		leadID = uuid.NewString()
 		state, intent, status, interest = "NEW", "UNKNOWN", "NEW", ""
 		stateRaw = []byte("{}")
@@ -950,6 +977,23 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		reply := "No problem — starting fresh. Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE."
 		merged, _ := json.Marshal(data)
 		_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(merged), leadID)
+		_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
+		if err := tx.Commit(ctx); err != nil {
+			return "", err
+		}
+		return reply, nil
+	}
+
+	// "hi" is init-only: a bare greeting from any live state restarts the
+	// menu instead of landing in the current step as an answer (e.g. "hi"
+	// at BUY_RESULTS used to get the generic more-cars reply). NEW falls
+	// through to the normal welcome; takeover stays silent above.
+	if isGreetingOnly(body) && state != "NEW" {
+		data = map[string]string{}
+		reply := "Welcome back! Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE."
+		merged, _ := json.Marshal(data)
+		_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(merged), leadID)
+		_, _ = tx.Exec(ctx, `UPDATE conversations SET lead_id=$1, updated_at=now() WHERE id=$2`, leadID, convID)
 		_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
 		if err := tx.Commit(ctx); err != nil {
 			return "", err
@@ -1412,30 +1456,63 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		}
 		_, _ = tx.Exec(ctx, `INSERT INTO vehicle_matches(lead_id,vehicle_id,score) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, leadID, c.id, score)
 		exactIDs[c.id] = true
-		exact = append(exact, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — RM%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
+		exact = append(exact, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — RM%d%s", c.make, c.model, c.year, c.price, specSuffix(c.fuel, c.trans))})
 	}
-	// Similar: same brand, or within ±25% of budget, or same fuel — excluding exact.
+	// Similar: same model (different year/price), same brand, budget-adjacent,
+	// or same fuel — excluding exact. Ranked by relevance so a same-model
+	// bike is never buried under unrelated cars (was: DB order, cap 9).
+	type scored struct {
+		it    matchItem
+		score int
+	}
+	var ranked []scored
 	for _, c := range all {
 		if exactIDs[c.id] {
 			continue
 		}
-		sim := false
+		score := 0
+		if model != "" && model != "any" && strings.Contains(strings.ToLower(c.model), model) {
+			score += 4 // same model family first (e.g. other C400GT years)
+		}
 		if brand != "" && brand != "any" && strings.Contains(strings.ToLower(c.make), brand) {
-			sim = true
+			score += 2
 		}
 		if mx > 0 && c.price >= mx*75/100 && c.price <= mx*125/100 {
-			sim = true
+			score += 2
 		}
 		if fuel != "" && fuel != "any" && strings.EqualFold(c.fuel, data["fuel"]) && mx == 0 {
-			sim = true
+			score += 1
 		}
-		if !sim {
+		if score == 0 {
 			continue
 		}
-		similar = append(similar, matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — RM%d (%s/%s)", c.make, c.model, c.year, c.price, c.fuel, c.trans)})
-		if len(similar) >= 9 {
+		ranked = append(ranked, scored{
+			it:    matchItem{id: c.id, text: fmt.Sprintf("%s %s %d — RM%d%s", c.make, c.model, c.year, c.price, specSuffix(c.fuel, c.trans))},
+			score: score,
+		})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+	for i, s := range ranked {
+		if i >= 9 {
 			break
 		}
+		similar = append(similar, s.it)
 	}
 	return exact, similar
+}
+
+// specSuffix renders " (PETROL/AUTOMATIC)", " (PETROL)" or "" — never "(/)"
+// for SDAS rows with blank fuel/transmission.
+func specSuffix(fuel, trans string) string {
+	fuel, trans = strings.TrimSpace(fuel), strings.TrimSpace(trans)
+	switch {
+	case fuel != "" && trans != "":
+		return " (" + fuel + "/" + trans + ")"
+	case fuel != "":
+		return " (" + fuel + ")"
+	case trans != "":
+		return " (" + trans + ")"
+	default:
+		return ""
+	}
 }

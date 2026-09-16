@@ -152,8 +152,23 @@ func (w *Worker) vehicleByID(ctx context.Context, tx pgx.Tx, id string) (vehicle
 	if claims != "" {
 		extra += "\nNote: " + claims
 	}
-	vd.text = fmt.Sprintf("*%s %s %d* — RM%d\n%s · %s · %s km%s%s%s",
-		mk, md, year, price, fuel, trans, itoaComma(km),
+	// Blank fuel/trans/km (SDAS rows) are omitted, never "(/)" or " ·  · 0 km".
+	specs := []string{}
+	if strings.TrimSpace(fuel) != "" {
+		specs = append(specs, strings.TrimSpace(fuel))
+	}
+	if strings.TrimSpace(trans) != "" {
+		specs = append(specs, strings.TrimSpace(trans))
+	}
+	if km > 0 {
+		specs = append(specs, itoaComma(km)+" km")
+	}
+	specLine := ""
+	if len(specs) > 0 {
+		specLine = "\n" + strings.Join(specs, " · ")
+	}
+	vd.text = fmt.Sprintf("*%s %s %d* — RM%d%s%s%s%s",
+		mk, md, year, price, specLine,
 		commaDesc(desc), extra,
 		notAvailNote(status))
 	vd.caption = fmt.Sprintf("%s %s %d — RM%d", mk, md, year, price)

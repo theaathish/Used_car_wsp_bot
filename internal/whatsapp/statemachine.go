@@ -91,6 +91,21 @@ func ParseBudget(s string) (int, int) {
 
 func norm(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
 
+// isGreetingOnly reports a bare greeting ("hi", "hello!", "vanakkam").
+// Unlike isGreeting (prefix/suffix match), this never fires on longer
+// sentences, so "hello i want bmw" flows through normally while a lone
+// "hi" is treated as a fresh-menu init from any state.
+func isGreetingOnly(body string) bool {
+	b := strings.Trim(strings.ToLower(strings.TrimSpace(body)), "!.?,;:~*_- ")
+	switch b {
+	case "hi", "hello", "hey", "yo", "hai", "vanakkam", "namaste", "namaskar",
+		"good morning", "good evening", "good afternoon", "h":
+		return true
+	default:
+		return false
+	}
+}
+
 // isGreeting matches hello-type openers across English + common transliterations.
 func isGreeting(body string) bool {
 	b := norm(body)
@@ -138,9 +153,11 @@ func findTrans(s string) string {
 }
 
 // ExtractAll pulls every structured field present in one message (BUY-009).
+// Budget is plausibility-gated (acceptBudget): model codes and years
+// ("BMW C400GT 2025") bank brand/model/year but never a bogus budget.
 func ExtractAll(body string) map[string]string {
 	out := map[string]string{}
-	if mn, mx := ParseBudget(body); mx > 0 {
+	if mn, mx, ok := acceptBudget(body); ok {
 		out["budget_min"] = strconv.Itoa(mn)
 		out["budget_max"] = strconv.Itoa(mx)
 	}
@@ -224,7 +241,63 @@ func choiceTrans(c int) string {
 		return ""
 	}
 }
+
+// hasBudgetSignal reports explicit budget phrasing: currency words/symbols,
+// lakh/lac, digit+k ("150k"), or range/intent words ("under", "budget"...).
+// Bare model codes ("C400GT") and years ("2025") carry no signal.
+// Short tokens use word boundaries so "cars"/"replace"/"performance" never match.
+func hasBudgetSignal(body string) bool {
+	t := strings.ToLower(body)
+	if strings.Contains(t, "₹") || strings.Contains(t, "rs.") {
+		return true
+	}
+	if regexp.MustCompile(`\b(lakh|lac|rs|rm|myr|ringgit|budget|under|below|around|max|upto|up\s+to|till|between)\b`).MatchString(t) {
+		return true
+	}
+	if regexp.MustCompile(`\d\s*k\b`).MatchString(t) && !strings.Contains(t, "km") {
+		return true
+	}
+	return false
+}
+
+// acceptBudget is ParseBudget gated by plausibility: model numbers and years
+// ("BMW C400GT 2025" -> 400,2025) must never become a RM400-2025 budget.
+// Accepts explicit phrasing (signal) or a large bare figure (>= 10000, above
+// any year/model number). Pure parsers stay untouched; this gates callers.
+func acceptBudget(body string) (int, int, bool) {
+	mn, mx := ParseBudget(body)
+	if mx <= 0 {
+		return 0, 0, false
+	}
+	if hasBudgetSignal(body) {
+		return mn, mx, true
+	}
+	t := strings.ToLower(body)
+	if strings.Contains(t, "km") {
+		return 0, 0, false // mileage figure, not money
+	}
+	if mx >= 10000 {
+		return mn, mx, true // bare large figure, e.g. "90000"
+	}
+	return 0, 0, false
+}
+// describeFind names banked brand/model/year for ack messages,
+// e.g. "BMW C400GT 2025. ".
+func describeFind(m map[string]string) string {
+	s := strings.TrimSpace(strings.TrimSpace(m["brand"]) + " " + strings.TrimSpace(m["model"]))
+	if y := strings.TrimSpace(m["year_min"]); y != "" {
+		if s != "" {
+			s += " "
+		}
+		s += y
+	}
+	if s == "" {
+		return ""
+	}
+	return s + ". "
+}
 func SplitBrandModel(body string) (string, string) {
+
 	parts := strings.Fields(strings.TrimSpace(body))
 	if len(parts) == 0 {
 		return "", ""
@@ -534,13 +607,15 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 				patch["model"] = strings.TrimSpace(br + " " + mo)
 			}
 		}
-		if _, mx := ParseBudget(body); mx == 0 {
+		if _, _, ok := acceptBudget(body); !ok {
 			if len(patch) > 0 {
 				merged := merge(data, patch)
-				nxt := nextMissingBuy(merged)
-				return nxt, "Got it — I'll come back to budget later. "+promptFor(nxt), "BUY", "QUALIFIED", patch
+				// Banked brand/model/year but no usable budget (e.g. model
+				// numbers like "C400GT 2025" are not money): name what we
+				// caught and ask budget outright — never "Noted budget".
+				return "BUY_BUDGET", "Got it — " + describeFind(merged) + promptFor("BUY_BUDGET"), "BUY", "QUALIFIED", patch
 			}
-			return "BUY_BUDGET", "I didn't catch the budget. Try e.g. *RM 90,000*, *100-200k*, or reply *don't know*.", "BUY", "QUALIFIED", patch
+			return "BUY_BUDGET", "I didn't catch the budget. Try e.g. *RM 90,000*, *100-200k*, or reply *0* to skip.", "BUY", "QUALIFIED", patch
 		}
 		merged := merge(data, patch)
 		nxt := nextMissingBuy(merged)
@@ -588,7 +663,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			if len(patch) > 0 {
 				return nextMissingBuy(merged), "Got it. " + promptFor(nextMissingBuy(merged)), "BUY", "QUALIFIED", patch
 			}
-			return "BUY_BRAND", "Which brand? (e.g. BMW, MINI, Audi, or *any*)", "BUY", "QUALIFIED", patch
+			return "BUY_BRAND", "Which brand? Reply the name, or *0* for any (e.g. BMW, MINI, Audi, 0)", "BUY", "QUALIFIED", patch
 		}
 		if br, mo := extractBrandModel(body); br != "" && mo != "" {
 			patch["brand"] = br // "BMW X1" in brand step fills both
@@ -628,7 +703,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			// as the model instead of looping the question forever.
 			patch["model"] = strings.TrimSpace(body)
 		} else {
-			return "BUY_MODEL", "Saved that. Which model exactly? (e.g. Swift, Creta, X1, or *any*)", "BUY", "QUALIFIED", patch
+			return "BUY_MODEL", "Saved that. Which model exactly? (e.g. Swift, Creta, X1, or *0* for any)", "BUY", "QUALIFIED", patch
 		}
 		merged := merge(data, patch)
 		nxt := nextMissingBuy(merged)
