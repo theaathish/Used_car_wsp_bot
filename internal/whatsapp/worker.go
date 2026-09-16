@@ -947,7 +947,7 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 	if tb := norm(body); tb == "start again" || tb == "restart" || tb == "menu" || tb == "main menu" || tb == "hi menu" {
 		state, intent, status = "ASK_INTENT", "UNKNOWN", "CONTACTED"
 		data = map[string]string{}
-		reply := "No problem — starting fresh. Are you looking to *BUY*, *SELL* or *EXCHANGE* a car?"
+		reply := "No problem — starting fresh. Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE."
 		merged, _ := json.Marshal(data)
 		_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(merged), leadID)
 		_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)

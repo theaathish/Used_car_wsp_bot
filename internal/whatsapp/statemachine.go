@@ -178,6 +178,52 @@ func parseSelection(body string) int {
 	n, _ := strconv.Atoi(m[1])
 	return n
 }
+
+// parseChoice matches a bare tap-style choice "0".."9" (also "1.", "2)",
+// "option 1") for QR-friendly numbered menus. Returns -1 when not a choice.
+// "0" means ANY / skip everywhere it appears.
+func parseChoice(body string) int {
+	m := regexp.MustCompile(`(?i)^\s*(?:option|car|number|no\.?)?\s*([0-9])\s*[\.\)]?\s*$`).FindStringSubmatch(body)
+	if len(m) != 2 {
+		return -1
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// choiceFuel maps 1-5/0 at the fuel step (text still works: petrol, diesel...).
+func choiceFuel(c int) string {
+	switch c {
+	case 1:
+		return "PETROL"
+	case 2:
+		return "DIESEL"
+	case 3:
+		return "CNG"
+	case 4:
+		return "ELECTRIC"
+	case 5:
+		return "HYBRID"
+	case 0:
+		return "ANY"
+	default:
+		return ""
+	}
+}
+
+// choiceTrans maps 1/2/0 at the transmission step.
+func choiceTrans(c int) string {
+	switch c {
+	case 1:
+		return "MANUAL"
+	case 2:
+		return "AUTOMATIC"
+	case 0:
+		return "ANY"
+	default:
+		return ""
+	}
+}
 func SplitBrandModel(body string) (string, string) {
 	parts := strings.Fields(strings.TrimSpace(body))
 	if len(parts) == 0 {
@@ -347,15 +393,15 @@ func promptFor(state string) string {
 	case "BUY_BUDGET":
 		return "What's your budget? (e.g. RM 90,000, 100-200k, or reply *don't know*)"
 	case "BUY_BRAND":
-		return "Which brand? (e.g. Maruti, Hyundai, BMW, or *any*)"
+		return "Which brand? Reply the name, or *0* for any (e.g. Maruti, Hyundai, BMW, 0)"
 	case "BUY_MODEL":
-		return "Which model? (e.g. Swift, Creta, X1, or *any*)"
+		return "Which model? Reply the name, or *0* for any (e.g. Swift, Creta, X1, 0)"
 	case "BUY_FUEL":
-		return "Fuel preference? *Petrol / Diesel / CNG / Electric / Any*"
+		return "Fuel? Reply 1 Petrol / 2 Diesel / 3 CNG / 4 Electric / 0 Any"
 	case "BUY_TRANS":
-		return "Transmission? *Manual / Automatic / Any*"
+		return "Transmission? Reply 1 Manual / 2 Automatic / 0 Any"
 	case "BUY_YEAR":
-		return "Minimum model year? (e.g. 2018, or *any*)"
+		return "Minimum model year? (e.g. 2018, or *0* for any)"
 	default:
 		return "Thanks! Let me find matching cars for you..."
 	}
@@ -412,7 +458,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		if wantsBuy(b) || wantsSell(b) || wantsExchange(b) {
 			return Next("ASK_INTENT", body, data)
 		}
-		return "ASK_INTENT", "Welcome to AutoKart! Are you looking to *BUY*, *SELL* or *EXCHANGE* a car?", "", "CONTACTED", patch
+		return "ASK_INTENT", "Welcome to AutoKart! Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE (or type the word).", "", "CONTACTED", patch
 	case "DONE":
 		// Finished flows restart instead of trapping the user in the
 		// fallback reply: wipe stale answers, then route like a new chat.
@@ -420,10 +466,23 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			delete(data, k)
 		}
 		if isGreeting(body) {
-			return "ASK_INTENT", "Welcome back! Are you looking to *BUY*, *SELL* or *EXCHANGE* a car?", "", "CONTACTED", patch
+			return "ASK_INTENT", "Welcome back! Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE.", "", "CONTACTED", patch
 		}
 		return Next("ASK_INTENT", body, data)
 	case "ASK_INTENT":
+		// QR-friendly numbered menu: 1=BUY 2=SELL 3=EXCHANGE (text still works).
+		// Inbound button/list taps arrive as their label/ID via messageText,
+		// so they flow through the same word matching below.
+		if c := parseChoice(body); c >= 1 && c <= 3 {
+			switch c {
+			case 1:
+				b = "buy"
+			case 2:
+				b = "sell"
+			case 3:
+				b = "exchange"
+			}
+		}
 		switch {
 		case wantsBuy(b):
 			for k, v := range ExtractAll(body) {
@@ -446,12 +505,12 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		case strings.Contains(b, "exchange") || strings.Contains(b, "replace"):
 			return "EXCHANGE_CURRENT", "Got it. Which is your current car? (brand, model, year, km — e.g. *Alto 2016, 60000km*)", "EXCHANGE", "QUALIFIED", patch
 		default:
-			return "ASK_INTENT", "Please reply with *BUY*, *SELL* or *EXCHANGE*.", "", "CONTACTED", patch
+			return "ASK_INTENT", "Please reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE.", "", "CONTACTED", patch
 		}
 	case "BUY_BUDGET":
-		if unknownBudget(body) {
+		if unknownBudget(body) || parseChoice(body) == 0 {
 			patch["budget_unknown"] = "1"
-			return "BUY_BRAND", "No worries! Our sales team can help with budget. Meanwhile — which brand do you prefer? (or *any*)", "BUY", "QUALIFIED", patch
+			return "BUY_BRAND", "No worries! Our sales team can help with budget. Meanwhile — which brand do you prefer? (name or *0* for any)", "BUY", "QUALIFIED", patch
 		}
 		// multi-field single message (BUY-009) + interruption-safe (INT-001):
 		// bank every structured hint; a short lettered message with no
@@ -493,6 +552,16 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		return nxt, "Noted budget. "+promptFor(nxt), "BUY", "QUALIFIED", patch
 	case "BUY_BRAND":
+		// "0" = ANY (QR tap-style); text still works.
+		if parseChoice(body) == 0 {
+			patch["brand"] = "ANY"
+			merged := merge(data, patch)
+			nxt := nextMissingBuy(merged)
+			if nxt == "BUY_RESULTS" {
+				return nxt, "Thanks! Let me find matching cars for you...", "BUY", "QUALIFIED", patch
+			}
+			return nxt, promptFor(nxt), "BUY", "QUALIFIED", patch
+		}
 		if b == "" || b == "any" || b == "no" {
 			patch["brand"] = "ANY"
 			merged := merge(data, patch)
@@ -549,7 +618,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		for k, v := range ExtractAll(body) {
 			patch[k] = v
 		}
-		if b == "" || b == "any" || b == "no" {
+		if b == "" || b == "any" || b == "no" || parseChoice(body) == 0 {
 			patch["model"] = "ANY"
 		} else if rem := stripKnown(body); rem != "" {
 			patch["model"] = rem
@@ -575,10 +644,12 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		if f := findFuel(body); f != "" {
 			patch["fuel"] = f
+		} else if cf := choiceFuel(parseChoice(body)); cf != "" {
+			patch["fuel"] = cf
 		} else if strings.Contains(b, "any") || b == "" || b == "no" || b == "skip" {
 			patch["fuel"] = "ANY"
 		} else if findTrans(body) != "" || hasBudget(body) {
-			return "BUY_FUEL", "Saved that. Still need fuel — *Petrol / Diesel / CNG / Electric / Any*?", "BUY", "QUALIFIED", patch
+			return "BUY_FUEL", "Saved that. Still need fuel — reply 1 Petrol / 2 Diesel / 3 CNG / 4 Electric / 0 Any?", "BUY", "QUALIFIED", patch
 		} else if !strings.Contains(b, "any") && b != "" {
 			patch["fuel"] = strings.TrimSpace(body)
 		}
@@ -596,10 +667,12 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		if tr := findTrans(body); tr != "" {
 			patch["transmission"] = tr
+		} else if ct := choiceTrans(parseChoice(body)); ct != "" {
+			patch["transmission"] = ct
 		} else if strings.Contains(b, "any") || b == "" || b == "no" || b == "skip" {
 			patch["transmission"] = "ANY"
 		} else if findFuel(body) != "" || hasBudget(body) {
-			return "BUY_TRANS", "Saved that. Still need transmission — *Manual / Automatic / Any*?", "BUY", "QUALIFIED", patch
+			return "BUY_TRANS", "Saved that. Still need transmission — reply 1 Manual / 2 Automatic / 0 Any?", "BUY", "QUALIFIED", patch
 		} else if !strings.Contains(b, "any") && b != "" {
 			patch["transmission"] = strings.TrimSpace(body)
 		}
@@ -681,7 +754,8 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		return "SELL_PHOTOS", "Please send car photos here on WhatsApp (front, rear, side, interior, dashboard, tyres). Reply *DONE* after sending.", "SELL", "QUALIFIED", patch
 	case "SELL_PHOTOS":
-		if strings.Contains(b, "done") {
+		// "1" is the tap-style DONE (photos have no numbers, so no clash).
+		if strings.Contains(b, "done") || parseChoice(body) == 1 {
 			return "DONE", "Thank you! Your sell request is recorded with status VALUATION_PENDING. Our team will call you for free inspection & valuation.", "SELL", "FOLLOWUP", patch
 		}
 		if n, err := strconv.Atoi(data["sell_photos"]); err == nil && n >= 10 {
@@ -689,7 +763,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		}
 		// Plain text is never a photo: only HandleMedia counts photos.
 		// (Flow-bug: every typed word inflated sell_photos before.)
-		return "SELL_PHOTOS", "Please send car photos here on WhatsApp (front, rear, side, interior, dashboard, tyres). Reply *DONE* after sending.", "SELL", "QUALIFIED", patch
+		return "SELL_PHOTOS", "Please send car photos here on WhatsApp (front, rear, side, interior, dashboard, tyres). Reply *1* or DONE after sending.", "SELL", "QUALIFIED", patch
 	case "EXCHANGE_CURRENT":
 		patch["exchange_current"] = strings.TrimSpace(body)
 		return "EXCHANGE_WANT", "What new car are you looking for? (budget + brand, e.g. Creta under RM 200,000)", "EXCHANGE", "QUALIFIED", patch
