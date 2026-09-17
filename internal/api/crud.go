@@ -109,8 +109,8 @@ func (s *Server) listLeads(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
 	limit := qInt(r, "limit", 50)
-	if limit > 100 {
-		limit = 100
+	if limit > 1000 {
+		limit = 1000
 	}
 	offset := qInt(r, "offset", 0)
 	// Optional filters for SDAS sheet: ?stock_status=FREESTOCK&q=218i&location=Ara

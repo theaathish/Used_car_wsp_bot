@@ -88,7 +88,7 @@ async function boot() {
 }
 async function reloadLookups() {
   const l = await api('GET', '/api/leads?limit=200'); LEADS = l.ok ? l.data : [];
-  const v = await api('GET', '/api/vehicles?limit=200'); VEHS = v.ok ? v.data : [];
+  const v = await api('GET', '/api/vehicles?limit=500'); VEHS = v.ok ? v.data : [];
   const b = await api('GET', '/api/bookings'); BOOKINGS = b.ok ? b.data : [];
   if (ME.role === 'admin') { const u = await api('GET', '/api/users'); USERS = u.ok ? u.data : []; }
   LABEL2ID = {};
@@ -325,7 +325,7 @@ function renderVeh() {
       '</div></div>';
   }).join('') : '<div class="empty">No vehicles — add your first car above.</div>';
 }
-async function loadVeh() { const r = await api('GET', '/api/vehicles?limit=100'); if (r.ok) { VEHS = r.data; renderVeh(); } const c = await api('GET', '/api/vehicles/count'); if (c.ok) { VEHCOUNT = c.data; renderVeh(); } }
+async function loadVeh() { const r = await api('GET', '/api/vehicles?limit=500'); if (r.ok) { VEHS = r.data; renderVeh(); } const c = await api('GET', '/api/vehicles/count'); if (c.ok) { VEHCOUNT = c.data; renderVeh(); } }
 async function addVehicle() {
   const g = function (id) { return val(id); };
   const body = {make: g('v_make'), model: g('v_model'), year: +g('v_year') || 0, price: +g('v_price') || 0, fuel: g('v_fuel'), transmission: g('v_trans'), km: +g('v_km') || 0, description: g('v_desc')};

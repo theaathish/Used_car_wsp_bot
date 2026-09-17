@@ -1171,8 +1171,8 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			exact, similar := runMatchingTx(ctx, tx, leadID, data)
 			combined := append(append([]matchItem{}, exact...), similar...)
 			// Page through the whole lot, not just the first screen.
-			if len(combined) > 200 {
-				combined = combined[:200]
+			if len(combined) > 1000 {
+				combined = combined[:1000]
 			}
 			// Name the sought vehicle so a miss is legible instead of a
 			// bare "no match" (e.g. "for BMW C400GT 2025").
@@ -1582,7 +1582,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 	}
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
 	for i, s := range ranked {
-		if i >= 200 {
+		if i >= 1000 {
 			break
 		}
 		similar = append(similar, s.it)
