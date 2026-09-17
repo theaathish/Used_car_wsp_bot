@@ -155,6 +155,29 @@ func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// GET /api/vehicles/count — true inventory totals (the list endpoint is
+// paged, so the admin page alone never shows the full count).
+func (s *Server) vehicleCounts(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Pool.Query(r.Context(), `SELECT status, COUNT(*) FROM vehicles GROUP BY status`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer rows.Close()
+	out := map[string]any{}
+	total := 0
+	for rows.Next() {
+		var st string
+		var n int
+		if err := rows.Scan(&st, &n); err == nil {
+			out[strings.ToLower(st)] = n
+			total += n
+		}
+	}
+	out["total"] = total
+	writeJSON(w, out)
+}
+
 func (s *Server) vehicleImages(r *http.Request, vehicleID string) []any {
 	rows, err := s.Pool.Query(r.Context(), `SELECT path FROM vehicle_images WHERE vehicle_id=$1 ORDER BY sort_order`, vehicleID)
 	if err != nil {

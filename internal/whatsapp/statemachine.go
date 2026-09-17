@@ -101,6 +101,31 @@ func norm(s string) string {
 // stored "C 400 GT" and vice versa.
 func nospace(s string) string { return strings.ReplaceAll(strings.ToLower(s), " ", "") }
 
+// noiseWords are filler tokens stripped before search extraction, so "no",
+// "ok" or "thanks" never become a brand/model query.
+var noiseWords = map[string]bool{
+	"no": true, "ok": true, "okay": true, "thanks": true, "thank": true,
+	"hmm": true, "hm": true, "oh": true, "ah": true, "super": true,
+	"seri": true, "sari": true, "dear": true, "please": true, "pls": true,
+	"hai": true, "hey": true, "yo": true, "hi": true, "hello": true,
+}
+
+// dropNoise removes filler whole-words ("no thanks" -> "", "no bmw" -> "bmw").
+func dropNoise(body string) string {
+	kept := []string{}
+	for _, w := range strings.Fields(body) {
+		lw := strings.ToLower(strings.Trim(w, ".,!?*"))
+		if lw == "" || noiseWords[lw] {
+			continue
+		}
+		kept = append(kept, w)
+	}
+	return strings.Join(kept, " ")
+}
+
+// hasDigit reports any 0-9 in the text (model codes, years, prices).
+func hasDigit(s string) bool { return strings.ContainsAny(s, "0123456789") }
+
 // isGreetingOnly reports a bare greeting ("hi", "hello!", "vanakkam").
 // Unlike isGreeting (prefix/suffix match), this never fires on longer
 // sentences, so "hello i want bmw" flows through normally while a lone
@@ -588,6 +613,31 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 		case strings.Contains(b, "exchange") || strings.Contains(b, "replace"):
 			return "EXCHANGE_CURRENT", "Got it. Which is your current car? (brand, model, year, km — e.g. *Alto 2016, 60000km*)", "EXCHANGE", "QUALIFIED", patch
 		default:
+			// Direct model search ("BMW C400GT", "C400GT 2025", "Swift diesel"):
+			// no intent word but clearly a vehicle -> show stock NOW with
+			// open filters instead of interrogating; the results loop
+			// refines from there. Needs a digit or a structured hint so
+			// plain chatter ("blah blah") still gets the menu.
+			if br, mo := extractBrandModel(dropNoise(body)); br != "" && (hasDigit(body) || len(ExtractAll(body)) > 0) {
+				for k, v := range ExtractAll(body) {
+					patch[k] = v
+				}
+				if mo != "" {
+					patch["brand"] = br
+					patch["model"] = mo
+				} else {
+					patch["model"] = br // single token: search by model, any make
+					patch["brand"] = "ANY"
+				}
+				patch["budget_unknown"] = "1"
+				if patch["fuel"] == "" {
+					patch["fuel"] = "ANY"
+				}
+				if patch["transmission"] == "" {
+					patch["transmission"] = "ANY"
+				}
+				return "BUY_RESULTS", "Showing matches for " + describeFind(merge(data, patch)) + "Reply the number for photos, *more cars* for the rest.", "BUY", "QUALIFIED", patch
+			}
 			return "ASK_INTENT", "Please reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE.", "", "CONTACTED", patch
 		}
 	case "BUY_BUDGET":

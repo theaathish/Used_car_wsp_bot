@@ -142,6 +142,62 @@ func copyMap(m map[string]string) map[string]string {
 	return out
 }
 
+// Direct model search ("BMW C400GT") with no intent word jumps straight to
+// results with open filters; plain chatter still gets the menu.
+func TestDirectSearch(t *testing.T) {
+	ns, reply, intent, _, patch := Next("ASK_INTENT", "BMW C400GT", map[string]string{})
+	if ns != "BUY_RESULTS" || intent != "BUY" {
+		t.Fatalf("got %s %s (%q)", ns, intent, reply)
+	}
+	if patch["brand"] != "BMW" || patch["model"] != "C400GT" {
+		t.Fatalf("brand/model: %+v", patch)
+	}
+	if patch["budget_unknown"] != "1" || patch["fuel"] != "ANY" || patch["transmission"] != "ANY" {
+		t.Fatalf("open filters: %+v", patch)
+	}
+
+	ns, _, _, _, patch = Next("ASK_INTENT", "C400GT 2025", map[string]string{})
+	if ns != "BUY_RESULTS" || patch["model"] != "C400GT" || patch["brand"] != "ANY" {
+		t.Fatalf("single-token: got %s %+v", ns, patch)
+	}
+
+	ns, _, _, _, patch = Next("ASK_INTENT", "Swift diesel", map[string]string{})
+	if ns != "BUY_RESULTS" || patch["fuel"] != "DIESEL" {
+		t.Fatalf("hint: got %s %+v", ns, patch)
+	}
+
+	ns, _, _, _, _ = Next("ASK_INTENT", "blah blah", map[string]string{})
+	if ns != "ASK_INTENT" {
+		t.Fatalf("chatter must stay, got %s", ns)
+	}
+	ns, _, _, _, _ = Next("ASK_INTENT", "Swift", map[string]string{})
+	if ns != "ASK_INTENT" {
+		t.Fatalf("digitless single word stays, got %s", ns)
+	}
+
+	// results-loop research markers: real search text carries no
+	// selection/photo/paging/interest patch, so the worker re-searches;
+	// noise never becomes a query.
+	_, _, _, _, patch = Next("BUY_RESULTS", "C400GT", map[string]string{})
+	if patch["select_idx"] != "" || patch["more_photos"] != "" || patch["interest"] != "" {
+		t.Fatalf("research text must be patch-clean: %+v", patch)
+	}
+	if br, _ := extractBrandModel(dropNoise("ok")); br != "" {
+		t.Fatalf("noise must not extract: %q", br)
+	}
+	for in, want := range map[string]string{
+		"no thanks": "", "no bmw": "bmw", "C400GT": "C400GT", "ok": "",
+	} {
+		br, mo := extractBrandModel(dropNoise(in))
+		if got := strings.TrimSpace(br + " " + mo); got != want {
+			t.Errorf("dropNoise(%q) -> %q; want %q", in, got, want)
+		}
+	}
+	if !hasDigit("C400GT 2025") || hasDigit("Swift") {
+		t.Fatal("hasDigit broken")
+	}
+}
+
 // modelMatches must find the bike no matter which column holds the name:
 // model, spaced model, description-only, or make-glued rows all match;
 // unrelated models never do.

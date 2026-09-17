@@ -162,6 +162,8 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.deleteLead(w, r)
 	case p == "/api/vehicles" && r.Method == "GET":
 		s.listVehicles(w, r)
+	case p == "/api/vehicles/count" && r.Method == "GET":
+		s.vehicleCounts(w, r)
 	case p == "/api/vehicles" && r.Method == "POST":
 		s.createVehicle(w, r)
 	case p == "/api/vehicles/import" && r.Method == "POST":

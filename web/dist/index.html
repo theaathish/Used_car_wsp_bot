@@ -119,7 +119,7 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <div class="thread"><div id="threadHead" class="muted" style="padding:10px 14px;border-bottom:1px solid var(--line)">Pick a conversation</div>
 <div class="msgs" id="thread"></div>
 <div class="replybar"><input id="replyBox" placeholder="Reply as AutoKart…" onkeydown="if(event.key==='Enter')sendReply()"/><button class="primary" onclick="sendReply()">Send</button></div></div></div></section>
-<section id="s-veh"><h3>Vehicles</h3>
+<section id="s-veh"><h3>Vehicles <span id="vehCount" class="muted small"></span></h3>
 <div class="toolbar"><input type="search" id="q_veh" placeholder="Search make / model…" oninput="renderVeh()"/>
 <select id="f_veh_status" onchange="renderVeh()"><option value="">All statuses</option><option>AVAILABLE</option><option>RESERVED</option><option>BOOKED</option><option>SOLD</option><option>DELIVERED</option><option>DRAFT</option></select>
 <button onclick="document.getElementById('vehForm').classList.toggle('hidden')">+ Add vehicle</button></div>

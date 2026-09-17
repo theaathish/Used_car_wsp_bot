@@ -1083,10 +1083,39 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 
 	var photoJobs []photoJob
 
-	// BUY_RESULTS: first arrival runs matching; "more cars" pages forward;
-	// a bare number ("1") opens that car's details with ALL its photos;
-	// "more photos" resends the full set for the selected (or top) car.
+	// BUY_RESULTS: first arrival runs matching; "more cars" pages forward
+	// through the WHOLE list; a bare number ("1") opens that car's details
+	// with ALL its photos; "more photos" resends the full set; any other
+	// model text starts a fresh search (sell loop, never a dead end).
 	if next == "BUY_RESULTS" {
+		research := false
+		if state == "BUY_RESULTS" && atoi(patch["select_idx"]) == 0 && patch["more_photos"] == "" && !moreCars && patch["interest"] == "" {
+			if nb := dropNoise(body); nb != "" {
+				if br, mo := extractBrandModel(nb); br != "" {
+					if ex := ExtractAll(nb); len(ex) > 0 {
+						for k, v := range ex {
+							data[k] = v
+						}
+						if ex["budget_max"] != "" {
+							delete(data, "budget_unknown") // explicit budget beats an old skip
+						}
+					}
+					if mo != "" {
+						data["brand"] = br
+						data["model"] = mo
+					} else {
+						data["model"] = br // single token: search by model, any make
+						data["brand"] = "ANY"
+					}
+					data["page_num"] = "0"
+					delete(data, "match_ids")
+					delete(data, "selected_vehicle")
+					m, _ := json.Marshal(data)
+					_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
+					research = true
+				}
+			}
+		}
 		page := atoi(data["page_num"])
 		if sel := atoi(patch["select_idx"]); sel > 0 {
 			if vd, ok := w.vehicleDetails(ctx, tx, data["match_ids"], sel); ok {
@@ -1134,15 +1163,16 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
 			items := w.matchItemsTx(ctx, tx, data["match_ids"], page*3, 3)
 			if len(items) == 0 {
-				reply = "That's all matching cars for now. Our team will call you with fresh arrivals."
+				reply = "That's everything matching your search. Reply a model name to search again, or *interested* and our team will call you with fresh arrivals."
 			} else {
 				reply = "More options (reply the number to see photos):\n" + strings.Join(numbered(items, page*3+1), "\n")
 			}
-		} else if state != "BUY_RESULTS" {
+		} else if state != "BUY_RESULTS" || research {
 			exact, similar := runMatchingTx(ctx, tx, leadID, data)
 			combined := append(append([]matchItem{}, exact...), similar...)
-			if len(combined) > 12 {
-				combined = combined[:12]
+			// Page through the whole lot, not just the first screen.
+			if len(combined) > 200 {
+				combined = combined[:200]
 			}
 			// Name the sought vehicle so a miss is legible instead of a
 			// bare "no match" (e.g. "for BMW C400GT 2025").
@@ -1150,8 +1180,11 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			if d := describeFind(data); d != "" {
 				want = " for " + strings.TrimSuffix(d, ". ")
 			}
+			if research {
+				reply = "Searching" + want + ":"
+			}
 			if len(combined) == 0 {
-				reply += "\nWe couldn't find an exact match" + want + ". Would you like to see similar vehicles? Reply *more cars*."
+				reply += "\nNothing in stock" + want + " right now. Reply another model to keep searching, or *interested* and our team will call you."
 			} else {
 				if len(exact) == 0 {
 					reply += "\nNo exact match" + want + ", but similar options (reply the number to see all photos):\n"
@@ -1549,7 +1582,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 	}
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
 	for i, s := range ranked {
-		if i >= 9 {
+		if i >= 200 {
 			break
 		}
 		similar = append(similar, s.it)

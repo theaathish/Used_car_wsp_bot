@@ -1,6 +1,6 @@
 let T = localStorage.getItem('token') || '';
 let ME = {};
-let LEADS = [], VEHS = [], CONVS = [], USERS = [], BOOKINGS = [];
+let LEADS = [], VEHS = [], VEHCOUNT = null, CONVS = [], USERS = [], BOOKINGS = [];
 let LABEL2ID = {};
 let curConv = null, convTimer = null, qrTimer = null;
 
@@ -303,6 +303,8 @@ function renderVeh() {
   const rows = VEHS.filter(function (o) {
     return (!q || (o.make + ' ' + o.model).toLowerCase().includes(q)) && (!fs || o.status === fs);
   });
+  const vc = document.getElementById('vehCount');
+  if (vc) vc.textContent = VEHCOUNT && VEHCOUNT.total != null ? '· ' + VEHCOUNT.total + ' total (' + VEHS.length + ' shown)' : '(' + VEHS.length + ' shown)';
   document.getElementById('veh').innerHTML = rows.length ? rows.map(function (o) {
     const imgs = o.images || [];
     let acts = '';
@@ -323,7 +325,7 @@ function renderVeh() {
       '</div></div>';
   }).join('') : '<div class="empty">No vehicles — add your first car above.</div>';
 }
-async function loadVeh() { const r = await api('GET', '/api/vehicles?limit=100'); if (r.ok) { VEHS = r.data; renderVeh(); } }
+async function loadVeh() { const r = await api('GET', '/api/vehicles?limit=100'); if (r.ok) { VEHS = r.data; renderVeh(); } const c = await api('GET', '/api/vehicles/count'); if (c.ok) { VEHCOUNT = c.data; renderVeh(); } }
 async function addVehicle() {
   const g = function (id) { return val(id); };
   const body = {make: g('v_make'), model: g('v_model'), year: +g('v_year') || 0, price: +g('v_price') || 0, fuel: g('v_fuel'), transmission: g('v_trans'), km: +g('v_km') || 0, description: g('v_desc')};
