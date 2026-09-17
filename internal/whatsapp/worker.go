@@ -768,15 +768,30 @@ func resolveIdentity(info types.MessageInfo) (string, types.JID) {
 	return "", replyJID
 }
 
+// sendCooldown spaces same-phone sends by 2s (rate safety). Returns how
+// long the caller must wait; zero means send now. Pure for tests.
+func sendCooldown(last, now time.Time) time.Duration {
+	if last.IsZero() {
+		return 0
+	}
+	if d := now.Sub(last); d < 2*time.Second {
+		return 2*time.Second - d
+	}
+	return 0
+}
+
 // Send delivers text via whatsmeow (stub-logs when disabled), enqueueing to
 // outbox on transport failure so WA-F003 PENDING->SENT recovery holds.
-// A 2s per-phone cooldown queues (not drops) bursts (§21: no spam behavior).
 func (w *Worker) Send(ctx context.Context, phone, text string) error {
 	return w.SendToJID(ctx, phoneToJID(phone), phone, text)
 }
 
 // SendToJID delivers to the exact Chat JID (LID-safe) while keeping the
 // stable phone identity for outbox retries and the CRM row.
+// The 2s per-phone cooldown (§21: no spam behavior) waits out the remainder
+// instead of parking in the outbox — parking delayed rapid replies by up to
+// a full 60s scheduler tick. The slot is reserved under lock so concurrent
+// senders line up instead of bursting together.
 func (w *Worker) SendToJID(ctx context.Context, jid types.JID, phone, text string) error {
 	key := phone
 	if key == "" {
@@ -786,11 +801,19 @@ func (w *Worker) SendToJID(ctx context.Context, jid types.JID, phone, text strin
 	if w.lastTx == nil {
 		w.lastTx = map[string]time.Time{}
 	}
-	if dt := time.Since(w.lastTx[key]); dt < 2*time.Second {
-		w.sendMu.Unlock()
-		_, _ = w.pool.Exec(ctx, `INSERT INTO outbox(phone,body,status) VALUES($1,$2,'PENDING') ON CONFLICT DO NOTHING`, phone, text)
-		return nil
+	wait := sendCooldown(w.lastTx[key], time.Now())
+	if wait > 0 {
+		w.lastTx[key] = time.Now().Add(wait)
 	}
+	w.sendMu.Unlock()
+	if wait > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	w.sendMu.Lock()
 	w.lastTx[key] = time.Now()
 	w.sendMu.Unlock()
 
@@ -1397,7 +1420,10 @@ func modelMatches(make_, model, desc, want string) bool {
 // runMatchingTx returns (exact, similar). Exact = in budget + all stated
 // filters; similar = same model/brand/budget-adjacent, excluding exact picks.
 func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[string]string) (exact, similar []matchItem) {
-	rows, err := tx.Query(ctx, `SELECT id::text, make, model, year, price, fuel, transmission, km, COALESCE(model_description,'') FROM vehicles WHERE status='AVAILABLE' LIMIT 100`)
+	// Scan the whole lot (SDAS bulk imports can exceed 100 rows; a low
+	// LIMIT silently cut matching off before the wanted bikes). 2000 rows
+	// of small columns is trivial for pgx and the in-Go scorer.
+	rows, err := tx.Query(ctx, `SELECT id::text, make, model, year, price, fuel, transmission, km, COALESCE(model_description,'') FROM vehicles WHERE status='AVAILABLE' LIMIT 2000`)
 	if err != nil {
 		return nil, nil
 	}

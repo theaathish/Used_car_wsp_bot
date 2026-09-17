@@ -44,3 +44,19 @@ func TestSessionGreetingInit(t *testing.T) {
 		t.Errorf("timeout = %s; want 30m", sessionTimeout)
 	}
 }
+
+func TestSendCooldown(t *testing.T) {
+	now := time.Now()
+	if got := sendCooldown(time.Time{}, now); got != 0 {
+		t.Fatalf("zero last: got %s want 0", got)
+	}
+	if got := sendCooldown(now.Add(-1*time.Second), now); got < 900*time.Millisecond || got > 1100*time.Millisecond {
+		t.Fatalf("1s ago: got %s want ~1s", got)
+	}
+	if got := sendCooldown(now.Add(-3*time.Second), now); got != 0 {
+		t.Fatalf("3s ago: got %s want 0", got)
+	}
+	if got := sendCooldown(now.Add(-100*time.Millisecond), now); got < 1800*time.Millisecond {
+		t.Fatalf("burst: got %s want ~1.9s", got)
+	}
+}
