@@ -41,5 +41,15 @@ whatsmeow = QR-paired companion, not Cloud API. Small ban/re-login risk. Session
 - `GET/POST /api/negotiations`, `GET/POST /api/finance`, `GET /api/sell-requests`, `GET/POST /api/reviews`, `GET /api/outbox`
 - `GET /api/whatsapp/status|qr`, `POST /api/whatsapp/send|logout|simulate`
 - `GET /api/metrics` (uptime, goroutines, pool, queues), `PATCH /api/conversations?id=` (`bot_enabled` takeover, close)
-- Backups: `BACKUP_DIR=/data/backups ./scripts/backup.sh` (cron daily), restore drill: `./scripts/restore.sh <file>`
-- Full TC list + QA checklist: `TESTING.md`. No payment endpoints by design.
+ - Backups: `BACKUP_DIR=/data/backups ./scripts/backup.sh` (cron daily), restore drill: `./scripts/restore.sh <file>`
+ - Full TC list + QA checklist: `TESTING.md`. No payment endpoints by design.
+
+## Production runbook
+- **One replica only.** The WhatsApp device + scheduler + outbox live in this process; two replicas flap the socket and double-send. Never scale past 1.
+- **Deploy verify:** `GET /api/health` → check `version` equals the pushed short SHA, `db: true`, `whatsapp.status: connected`. Mismatched version = old build still serving.
+- **Backups (pg_dump ships in the image):** Railway cron daily: `BACKUP_DIR=/data/backups ./scripts/backup.sh` with `DATABASE_URL` set. Keeps newest 7. Monthly: restore drill into a fresh DB (`./scripts/restore.sh`) and compare row counts.
+- **WhatsApp flap:** `connecting` with rising `cycles_10m` = socket drops (redeploy overlap, phone offline, companion killed). Steady state is `connected`, `fail_count: 0`. `expired`/`logged_out` → admin Reconnect → rescan QR. Every Stopping/Starting Container pair briefly flaps — avoid rapid successive deploys.
+- **Timeouts:** chats idle 30 min auto-close; bare `hi` always reopens the menu.
+- **Limits:** 600 req/min/IP on `/api/*` (`/api/health`, `/api/metrics` exempt); login 10 fails/5 min → 429; uploads 5MB, sniffed jpg/png/webp, 10/vehicle.
+- **Secrets:** `JWT_SECRET` must be 32 random chars (boot warns on the dev default); seed creds via env, rotate after staff exit; last-admin guards block self-demote/delete.
+- **Disk:** `/api/health` `disk_used_pct` — images at `/data/images`; ~500 cars max on 0.5GB, then move to S3/Cloudinary (`internal/images`).

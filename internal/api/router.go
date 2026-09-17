@@ -26,6 +26,7 @@ type Server struct {
 	Images    *images.Store
 	DataDir   string
 	StartedAt time.Time
+	Version   string // git sha (Railway) or "dev" — surfaced in /api/health
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -93,7 +94,7 @@ func (s *Server) Router(webFS http.FileSystem) http.Handler {
 		})
 	}
 	// CORS wrapper
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cors := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
@@ -102,6 +103,13 @@ func (s *Server) Router(webFS http.FileSystem) http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 	})
+	// Production chain (inner → outer): rate limit (health/metrics exempt)
+	// → access log → security headers → panic recovery.
+	var h http.Handler = cors
+	h = rateLimit(newIPLimiter(600, time.Minute), h)
+	h = accessLog(h)
+	h = securityHeaders(h)
+	return recoverer(h)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +126,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"ok": true, "db": dbOK, "disk": disk, "disk_used_pct": diskPct,
-		"timezone": whatsapp.ZoneName(),
+		"timezone": whatsapp.ZoneName(), "version": s.Version,
+		"uptime_seconds": int64(time.Since(s.StartedAt).Seconds()),
 		"whatsapp": s.WA.Status(), "time": time.Now().UTC(),
 	})
 }

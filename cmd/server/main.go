@@ -24,6 +24,16 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if cfg.JWTSecret == "dev-secret-change-me" {
+		log.Printf("WARNING: JWT_SECRET is the dev default — set a 32-char secret in production or any restart logs everyone out and tokens are forgeable")
+	}
+	version := os.Getenv("RAILWAY_GIT_COMMIT_SHA")
+	if len(version) > 7 {
+		version = version[:7]
+	}
+	if version == "" {
+		version = "dev"
+	}
 	log.Printf("sellingbot starting port=%s whatsapp=%v datadir=%s", cfg.Port, cfg.WhatsappEnabled, cfg.DataDir)
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatal(err)
@@ -85,8 +95,17 @@ func main() {
 
 	webHTTP := http.FS(webdist.FS)
 
-	srv := &api.Server{Pool: pool, Secret: cfg.JWTSecret, WA: wa, Images: st, DataDir: cfg.DataDir, StartedAt: time.Now()}
-	httpSrv := &http.Server{Addr: ":" + cfg.Port, Handler: srv.Router(webHTTP)}
+	srv := &api.Server{Pool: pool, Secret: cfg.JWTSecret, WA: wa, Images: st, DataDir: cfg.DataDir, StartedAt: time.Now(), Version: version}
+	// Timeouts: a slow client must never hold a worker forever (Slowloris).
+	// Write covers local-disk images + JSON; 60s is generous, not infinite.
+	httpSrv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           srv.Router(webHTTP),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	go func() {
 		log.Printf("listening :%s", cfg.Port)
