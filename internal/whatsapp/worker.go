@@ -1121,11 +1121,17 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			if len(combined) > 12 {
 				combined = combined[:12]
 			}
+			// Name the sought vehicle so a miss is legible instead of a
+			// bare "no match" (e.g. "for BMW C400GT 2025").
+			want := ""
+			if d := describeFind(data); d != "" {
+				want = " for " + strings.TrimSuffix(d, ". ")
+			}
 			if len(combined) == 0 {
-				reply += "\nWe couldn't find an exact match. Would you like to see similar vehicles? Reply *more cars*."
+				reply += "\nWe couldn't find an exact match" + want + ". Would you like to see similar vehicles? Reply *more cars*."
 			} else {
 				if len(exact) == 0 {
-					reply += "\nNo exact match, but similar options (reply the number to see all photos):\n"
+					reply += "\nNo exact match" + want + ", but similar options (reply the number to see all photos):\n"
 				} else {
 					reply += "\nTop picks (reply the number to see all photos):\n"
 				}
@@ -1377,21 +1383,32 @@ func pageItems(in []matchItem, page int) []matchItem {
 	return in[start:end]
 }
 
+// modelMatches reports whether a stored vehicle fits the wanted model.
+// Spaceless on both sides ("C400GT" = "C 400 GT") and falls back to the
+// SDAS model description and make, so odd column splits (model living in
+// the description, make holding "BMW C400GT", ...) never hide stock.
+func modelMatches(make_, model, desc, want string) bool {
+	w := nospace(want)
+	return strings.Contains(nospace(model), w) ||
+		strings.Contains(nospace(desc), w) ||
+		strings.Contains(nospace(make_), w)
+}
+
 // runMatchingTx returns (exact, similar). Exact = in budget + all stated
-// filters; similar = same brand OR budget-adjacent, excluding exact picks.
+// filters; similar = same model/brand/budget-adjacent, excluding exact picks.
 func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[string]string) (exact, similar []matchItem) {
-	rows, err := tx.Query(ctx, `SELECT id::text, make, model, year, price, fuel, transmission, km FROM vehicles WHERE status='AVAILABLE' LIMIT 100`)
+	rows, err := tx.Query(ctx, `SELECT id::text, make, model, year, price, fuel, transmission, km, COALESCE(model_description,'') FROM vehicles WHERE status='AVAILABLE' LIMIT 100`)
 	if err != nil {
 		return nil, nil
 	}
 	type v struct {
-		id, make, model, fuel, trans string
-		year, price, km              int
+		id, make, model, fuel, trans, desc string
+		year, price, km                     int
 	}
 	var all []v
 	for rows.Next() {
 		var c v
-		if err := rows.Scan(&c.id, &c.make, &c.model, &c.year, &c.price, &c.fuel, &c.trans, &c.km); err == nil {
+		if err := rows.Scan(&c.id, &c.make, &c.model, &c.year, &c.price, &c.fuel, &c.trans, &c.km, &c.desc); err == nil {
 			all = append(all, c)
 		}
 	}
@@ -1403,6 +1420,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 	fuel := strings.ToLower(data["fuel"])
 	trans := strings.ToLower(data["transmission"])
 	ym := atoi(data["year_min"])
+	log.Printf("[match] lead=%s filters brand=%q model=%q year>=%d budget<=%d avail=%d", leadID, brand, model, ym, mx, len(all))
 
 	isExact := func(c v) (bool, int) {
 		score := 0
@@ -1419,7 +1437,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 			return false, 0
 		}
 		score += 2
-		if model != "" && model != "any" && !strings.Contains(nospace(c.model), nospace(model)) {
+		if model != "" && model != "any" && !modelMatches(c.make, c.model, c.desc, model) {
 			return false, 0
 		}
 		if model != "" && model != "any" {
@@ -1471,7 +1489,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 			continue
 		}
 		score := 0
-		if model != "" && model != "any" && strings.Contains(nospace(c.model), nospace(model)) {
+		if model != "" && model != "any" && modelMatches(c.make, c.model, c.desc, model) {
 			score += 4 // same model family first (e.g. other C400GT years)
 		}
 		if brand != "" && brand != "any" && strings.Contains(strings.ToLower(c.make), brand) {
@@ -1498,6 +1516,7 @@ func runMatchingTx(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 		}
 		similar = append(similar, s.it)
 	}
+	log.Printf("[match] lead=%s result exact=%d similar=%d", leadID, len(exact), len(similar))
 	return exact, similar
 }
 

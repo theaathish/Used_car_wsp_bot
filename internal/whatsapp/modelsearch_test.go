@@ -141,3 +141,31 @@ func copyMap(m map[string]string) map[string]string {
 	}
 	return out
 }
+
+// modelMatches must find the bike no matter which column holds the name:
+// model, spaced model, description-only, or make-glued rows all match;
+// unrelated models never do.
+func TestModelMatchesColumns(t *testing.T) {
+	match := []struct{ make_, model, desc string }{
+		{"BMW", "C400GT", "BMW C400GT Diamond White"},
+		{"BMW", "C 400 GT", "BMW C 400 GT"},
+		{"BMW", "", "BMW C400GT Diamond White"},
+		{"BMW", "C400GT 2025", ""},
+		{"BMW C400GT", "2025", ""},
+	}
+	for _, tc := range match {
+		if !modelMatches(tc.make_, tc.model, tc.desc, "c400gt") {
+			t.Errorf("must match make=%q model=%q desc=%q", tc.make_, tc.model, tc.desc)
+		}
+	}
+	nomatch := []struct{ make_, model, desc string }{
+		{"BMW", "218i Gran Coupe M Sport", "BMW 218i Gran Coupe M Sport"},
+		{"BMW", "R1250GS Adventure", "BMW R1250GS Adventure"},
+		{"Volvo", "XC90 T8 Reskin", "Volvo XC90"},
+	}
+	for _, tc := range nomatch {
+		if modelMatches(tc.make_, tc.model, tc.desc, "c400gt") {
+			t.Errorf("must NOT match make=%q model=%q desc=%q", tc.make_, tc.model, tc.desc)
+		}
+	}
+}
