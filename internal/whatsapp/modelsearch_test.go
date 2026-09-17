@@ -162,10 +162,16 @@ func TestModelMatchesColumns(t *testing.T) {
 		{"BMW", "218i Gran Coupe M Sport", "BMW 218i Gran Coupe M Sport"},
 		{"BMW", "R1250GS Adventure", "BMW R1250GS Adventure"},
 		{"Volvo", "XC90 T8 Reskin", "Volvo XC90"},
+		{"BMW", "GT", "Grand Tourer"},
+		{"BMW", "X", ""},
 	}
 	for _, tc := range nomatch {
 		if modelMatches(tc.make_, tc.model, tc.desc, "c400gt") {
 			t.Errorf("must NOT match make=%q model=%q desc=%q", tc.make_, tc.model, tc.desc)
 		}
+	}
+	// stored fragment still identifies the family
+	if !modelMatches("BMW", "C400", "", "c400gt") {
+		t.Error("stored fragment C400 must match query c400gt")
 	}
 }

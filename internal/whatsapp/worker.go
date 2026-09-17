@@ -1410,11 +1410,23 @@ func pageItems(in []matchItem, page int) []matchItem {
 // Spaceless on both sides ("C400GT" = "C 400 GT") and falls back to the
 // SDAS model description and make, so odd column splits (model living in
 // the description, make holding "BMW C400GT", ...) never hide stock.
+// A stored fragment ("c400") also matches a longer query ("c400gt");
+// tiny fragments ("gt", "x1") are ignored so they can't match anything.
 func modelMatches(make_, model, desc, want string) bool {
 	w := nospace(want)
-	return strings.Contains(nospace(model), w) ||
-		strings.Contains(nospace(desc), w) ||
-		strings.Contains(nospace(make_), w)
+	for _, s := range []string{model, desc, make_} {
+		ns := nospace(s)
+		if ns == "" {
+			continue
+		}
+		if strings.Contains(ns, w) {
+			return true
+		}
+		if len(ns) >= 4 && strings.Contains(w, ns) {
+			return true
+		}
+	}
+	return false
 }
 
 // runMatchingTx returns (exact, similar). Exact = in budget + all stated
