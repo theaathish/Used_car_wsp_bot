@@ -58,7 +58,7 @@ function logout() { localStorage.removeItem('token'); location.reload(); }
 /* ---------- nav ---------- */
 const NAV = [['dash', 'Dashboard'], ['wa', 'WhatsApp'], ['cust', 'Customers'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
   ['td', 'Test Drives'], ['fu', 'Follow-ups'], ['bk', 'Bookings'], ['neg', 'Negotiations'], ['fin', 'Finance'],
-  ['sell', 'Sell Requests'], ['rev', 'Reviews'], ['team', 'Team'], ['set', 'Settings'], ['sim', 'Simulator']];
+  ['sell', 'Sell Requests'], ['exc', 'Exchange'], ['rev', 'Reviews'], ['team', 'Team'], ['set', 'Settings'], ['sim', 'Simulator']];
 function buildNav() {
   document.getElementById('nav').innerHTML = NAV.filter(function (n) { return n[0] !== 'team' || ME.role === 'admin'; })
     .map(function (n) { return '<button id="nav-' + n[0] + '" onclick="show(\'' + n[0] + '\')"><span class="t">' + n[1] + '</span><span class="n" id="badge-' + n[0] + '"></span></button>'; }).join('');
@@ -84,7 +84,7 @@ async function boot() {
   ['NEW', 'CONTACTED', 'QUALIFIED', 'TEST_DRIVE', 'FOLLOWUP', 'BOOKED', 'CONVERTED', 'LOST'].forEach(function (s) {
     const o = document.createElement('option'); o.textContent = s; st.appendChild(o);
   });
-  dash(); waStatus(); loadCust(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadFU(); loadBK(); loadNG(); loadFIN(); loadSELL(); loadRV(); loadUsers(); loadSettings();
+  dash(); waStatus(); loadCust(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadFU(); loadBK(); loadNG(); loadFIN(); loadSELL(); loadEXC(); loadRV(); loadUsers(); loadSettings();
 }
 async function reloadLookups() {
   const l = await api('GET', '/api/leads?limit=200'); LEADS = l.ok ? l.data : [];
@@ -443,6 +443,16 @@ async function loadSELL() {
       return '<tr><td>' + esc(o.phone) + '<br/>' + sid(o.id) + '</td><td><b>' + esc(o.brand) + ' ' + esc(o.model) + '</b><br/><span class="muted small">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + esc(o.condition) + ' · ' + esc(o.location) + '</span></td><td>' + esc(o.year) + '</td><td>' + Number(o.km || 0).toLocaleString('en-IN') + '</td><td class="small">' + esc(o.registration) + '</td><td>' + esc(o.photo_count) + '</td><td>' + pill(o.status) + '</td><td>' + act + '</td></tr>';
     }).join('') + '</table>' : '<div class="empty">No sell requests.</div>';
 }
+async function loadEXC() {
+  const r = await api('GET', '/api/exchange-valuations'); if (!r.ok) return;
+  document.getElementById('exc').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Car</th><th>Year</th><th>KM</th><th>Reg</th><th>Photos</th><th>Status</th><th></th></tr>' +
+    r.data.map(function (o) {
+      let act = '';
+      if (o.status === 'VALUATION_PENDING') act = '<button class="small primary" onclick="exchangeAccept(\'' + o.id + '\')">Accept</button> <button class="small danger" onclick="exchangeReject(\'' + o.id + '\')">Reject</button>';
+      else act = '<button class="small" onclick="exchangeReopen(\'' + o.id + '\')">Reopen</button>';
+      return '<tr><td>' + esc(o.phone) + '<br/>' + sid(o.id) + '</td><td><b>' + esc(o.brand) + ' ' + esc(o.model) + '</b><br/><span class="muted small">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + esc(o.condition) + ' · ' + esc(o.location) + '</span></td><td>' + esc(o.year) + '</td><td>' + Number(o.km || 0).toLocaleString('en-IN') + '</td><td class="small">' + esc(o.registration) + '</td><td>' + esc(o.photo_count) + '</td><td>' + pill(o.status) + '</td><td>' + act + '</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No exchange requests.</div>';
+}
 async function loadRV() {
   const r = await api('GET', '/api/reviews'); if (!r.ok) return;
   document.getElementById('rev').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Rating</th><th>Review</th><th></th></tr>' +
@@ -560,4 +570,19 @@ async function sellReject(id) {
 async function sellReopen(id) {
   const r = await api('POST', '/api/sell-requests/' + id + '/reopen', {});
   if (r.ok) { toast('Reopened'); loadSELL(); }
+}
+async function exchangeAccept(id) {
+  const v = prompt('Accept valuation — enter agreed price in RM:', '0');
+  if (v === null) return;
+  const r = await api('POST', '/api/exchange-valuations/' + id + '/accept', {price: +v || 0});
+  if (r.ok) { toast('Accepted — car added to inventory (EXCHANGED)'); loadEXC(); loadVeh(); }
+}
+async function exchangeReject(id) {
+  if (!confirm('Reject this exchange request?')) return;
+  const r = await api('POST', '/api/exchange-valuations/' + id + '/reject', {});
+  if (r.ok) { toast('Rejected'); loadEXC(); }
+}
+async function exchangeReopen(id) {
+  const r = await api('POST', '/api/exchange-valuations/' + id + '/reopen', {});
+  if (r.ok) { toast('Reopened'); loadEXC(); }
 }

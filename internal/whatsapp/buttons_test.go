@@ -49,8 +49,9 @@ func TestButtonChoices(t *testing.T) {
 		{"brand_0_any", "BUY_BRAND", "0", mk("budget_max", "500000"), "BUY_MODEL", "brand", "ANY"},
 		{"model_0_any", "BUY_MODEL", "0", mk("budget_max", "500000", "brand", "M"), "BUY_FUEL", "model", "ANY"},
 		{"budget_0_skip", "BUY_BUDGET", "0", nil, "BUY_BRAND", "budget_unknown", "1"},
-		{"sellphoto_1_done", "SELL_PHOTOS", "1", nil, "DONE", "", ""},
-		{"sellphoto_done_still_works", "SELL_PHOTOS", "DONE", nil, "DONE", "", ""},
+		{"sellphoto_1_done", "SELL_PHOTOS", "1", nil, "SELL_INSPECTION", "", ""},
+		{"sellphoto_done_still_works", "SELL_PHOTOS", "DONE", nil, "SELL_INSPECTION", "", ""},
+		{"sellinspection_books", "SELL_INSPECTION", "tomorrow 11am", nil, "DONE", "inspection_raw", "tomorrow 11am"},
 		{"results_number_still_selects_car", "BUY_RESULTS", "2", nil, "BUY_RESULTS", "select_idx", "2"},
 	}
 	for _, tc := range cases {

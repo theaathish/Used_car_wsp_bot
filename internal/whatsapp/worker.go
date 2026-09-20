@@ -191,8 +191,8 @@ var validStates = map[string]bool{
 	"NEW": true, "ASK_INTENT": true,
 	"BUY_BUDGET": true, "BUY_BRAND": true, "BUY_MODEL": true, "BUY_FUEL": true,
 	"BUY_TRANS": true, "BUY_YEAR": true, "BUY_RESULTS": true,
-	"FINANCE_INFO": true, "TESTDRIVE_ASK": true,
-	"SELL_CAR": true, "SELL_YEAR": true, "SELL_DETAILS": true, "SELL_SPECS": true, "SELL_PHOTOS": true,
+	"FINANCE_INFO": true, "TESTDRIVE_ASK": true, "POST_TESTDRIVE_FOLLOWUP": true,
+	"SELL_CAR": true, "SELL_YEAR": true, "SELL_DETAILS": true, "SELL_SPECS": true, "SELL_PHOTOS": true, "SELL_INSPECTION": true,
 	"EXCHANGE_CURRENT": true, "EXCHANGE_WANT": true, "DONE": true,
 }
 
@@ -1120,7 +1120,7 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		if sel := atoi(patch["select_idx"]); sel > 0 {
 			if vd, ok := w.vehicleDetails(ctx, tx, data["match_ids"], sel); ok {
 				reply = vd.text + "\nLike it? Reply *YES* to confirm, *test drive* to book a visit, or *more cars* for others."
-				photoJobs = w.vehiclePhotoJobs(vd.photos, vd.caption, 5)
+				photoJobs = w.vehiclePhotoJobs(vd.photos, vd.caption, DetailViewPhotoLimit)
 				data["selected_vehicle"] = vd.id
 				m, _ := json.Marshal(data)
 				_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
@@ -1146,7 +1146,7 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			if _, err := uuid.Parse(vid); err != nil {
 				reply = "No photos uploaded for this car yet — our team will share them on call. Reply *YES* to confirm interest or *test drive* to visit."
 				vid = ""
-			} else if photos := w.vehiclePhotosTx(ctx, tx, vid, 6); len(photos) == 0 {
+			} else if photos := w.vehiclePhotosTx(ctx, tx, vid, DetailViewPhotoLimit); len(photos) == 0 {
 				reply = "No photos uploaded for this car yet — our team will share them on call. Reply *YES* to confirm interest or *test drive* to visit."
 			} else {
 				cap_ := ""
@@ -1154,7 +1154,7 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 					cap_ = " of " + vd.caption
 				}
 				reply = "Here are all photos" + cap_ + ": Reply *YES* to confirm or *test drive* to book."
-				photoJobs = w.vehiclePhotoJobs(photos, strings.TrimPrefix(cap_, " of "), 6)
+				photoJobs = w.vehiclePhotoJobs(photos, strings.TrimPrefix(cap_, " of "), DetailViewPhotoLimit)
 			}
 		} else if moreCars {
 			page++
@@ -1163,7 +1163,16 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 			_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
 			items := w.matchItemsTx(ctx, tx, data["match_ids"], page*3, 3)
 			if len(items) == 0 {
-				reply = "That's everything matching your search. Reply a model name to search again, or *interested* and our team will call you with fresh arrivals."
+				// Exhausted: restart cleanly (same wipe as intent-switch).
+				reply = "That's all the matches we have for your criteria. Let's start over — reply 1 BUY, 2 SELL, 3 EXCHANGE, or share new requirements."
+				next = "ASK_INTENT"
+				intent = "UNKNOWN"
+				status = "CONTACTED"
+				for k := range data {
+					delete(data, k)
+				}
+				m2, _ := json.Marshal(data)
+				_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(m2), leadID)
 			} else {
 				reply = "More options (reply the number to see photos):\n" + strings.Join(numbered(items, page*3+1), "\n")
 			}
@@ -1184,7 +1193,16 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 				reply = "Searching" + want + ":"
 			}
 			if len(combined) == 0 {
-				reply += "\nNothing in stock" + want + " right now. Reply another model to keep searching, or *interested* and our team will call you."
+				// Zero matches on a fresh search: same restart as exhausted pages.
+				reply = "That's all the matches we have for your criteria. Let's start over — reply 1 BUY, 2 SELL, 3 EXCHANGE, or share new requirements."
+				next = "ASK_INTENT"
+				intent = "UNKNOWN"
+				status = "CONTACTED"
+				for k := range data {
+					delete(data, k)
+				}
+				m0, _ := json.Marshal(data)
+				_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(m0), leadID)
 			} else {
 				if len(exact) == 0 {
 					reply += "\nNo exact match" + want + ", but similar options (reply the number to see all photos):\n"
@@ -1216,16 +1234,87 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		}
 	}
 
-	// SELL done -> valuation handoff row (idempotent per lead). Guarded by
-	// prevState so a hijacked DONE (e.g. finance keyword mid-sell, now
-	// scoped out above, or any future global) can never file a junk
-	// VALUATION_PENDING row from a half-filled form.
-	if prevState == "SELL_PHOTOS" && next == "DONE" && intent == "SELL" {
+	// SELL inspection booking: slot first (mirrors test-drive booking).
+	// Reopened means ask again; valuation row below only fires on DONE.
+	inspHandled := false
+	if state == "SELL_INSPECTION" && next == "DONE" {
+		inspHandled = true
+		if inspReply, reopened := w.bookInspectionTx(ctx, tx, leadID, custID, body); reopened {
+			next = "SELL_INSPECTION"
+			mergedI, _ := json.Marshal(dataWithPrev(data, "SELL_INSPECTION"))
+			_, _ = tx.Exec(ctx, `UPDATE leads SET state='SELL_INSPECTION',state_data=$1,updated_at=now() WHERE id=$2`, string(mergedI), leadID)
+			reply = inspReply
+		} else {
+			reply = inspReply
+		}
+	}
+
+	// SELL done -> valuation handoff row (idempotent per lead). Fires only
+	// after the inspection is scheduled (prevState SELL_INSPECTION), so
+	// valuation staff work post-appointment. Guarded by prevState so a
+	// hijacked DONE can never file a junk VALUATION_PENDING row.
+	if prevState == "SELL_INSPECTION" && next == "DONE" && intent == "SELL" && inspHandled {
 		_, _ = tx.Exec(ctx, `INSERT INTO sell_requests(lead_id,brand,model,year,registration,km,fuel,transmission,condition,location,photo_count,status)
 			SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'VALUATION_PENDING'
 			WHERE NOT EXISTS (SELECT 1 FROM sell_requests WHERE lead_id=$1)`,
 			leadID, data["sell_brand"], data["sell_model"], atoi(data["sell_year"]), data["sell_reg"],
 			atoi(data["sell_km"]), data["sell_fuel"], data["sell_trans"], data["sell_specs"], data["sell_location"], atoi(data["sell_photos"]))
+	}
+
+	// EXCHANGE valuation queue row (idempotent per lead): staff prices the
+	// trade-in like SELL while the chat continues to new-car matching.
+	if prevState == "EXCHANGE_CURRENT" && next == "EXCHANGE_WANT" && intent == "EXCHANGE" {
+		_, _ = tx.Exec(ctx, `INSERT INTO exchange_valuations(lead_id,current_car,status)
+			SELECT $1,$2,'VALUATION_PENDING'
+			WHERE NOT EXISTS (SELECT 1 FROM exchange_valuations WHERE lead_id=$1)`,
+			leadID, data["exchange_current"])
+	}
+
+	// EXCHANGE_WANT -> same matching engine as BUY (top 3 + teaser).
+	// Keeps intent EXCHANGE, moves state into BUY_RESULTS so detail /
+	// photos / pagination / interest / test-drive all work downstream.
+	if prevState == "EXCHANGE_WANT" && next == "DONE" && intent == "EXCHANGE" {
+		_, _ = tx.Exec(ctx, `UPDATE exchange_valuations SET want=$1 WHERE lead_id=$2`, data["exchange_want"], leadID)
+		exact, similar := runMatchingTx(ctx, tx, leadID, data)
+		combined := append(append([]matchItem{}, exact...), similar...)
+		if len(combined) > 1000 {
+			combined = combined[:1000]
+		}
+		if len(combined) == 0 {
+			reply = "That's all the matches we have for your criteria. Let's start over — reply 1 BUY, 2 SELL, 3 EXCHANGE, or share new requirements."
+			next = "ASK_INTENT"
+			intent = "UNKNOWN"
+			status = "CONTACTED"
+			for k := range data {
+				delete(data, k)
+			}
+			m0, _ := json.Marshal(data)
+			_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(m0), leadID)
+		} else {
+			reply = "\nTop picks (reply the number to see all photos):\n"
+			first := combined
+			if len(first) > 3 {
+				first = first[:3]
+			}
+			reply += strings.Join(numbered(first, 1), "\n")
+			ids := make([]string, 0, len(combined))
+			for _, it := range combined {
+				ids = append(ids, it.id)
+			}
+			data["match_ids"] = strings.Join(ids, ",")
+			data["page_num"] = "0"
+			next = "BUY_RESULTS"
+			status = "QUALIFIED"
+			m, _ := json.Marshal(dataWithPrev(data, "EXCHANGE_WANT"))
+			_, _ = tx.Exec(ctx, `UPDATE leads SET state='BUY_RESULTS',status='QUALIFIED',state_data=$1,updated_at=now() WHERE id=$2`, string(m), leadID)
+			if len(first) > 0 {
+				photoJobs = append(photoJobs, w.vehiclePhotoJobs(w.vehiclePhotosTx(ctx, tx, first[0].id, 1), first[0].text, 1)...)
+			}
+			_, _ = tx.Exec(ctx, `INSERT INTO requirements(lead_id,budget_min,budget_max,brand,model,fuel,transmission,year_min)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+				leadID, atoi(data["budget_min"]), atoi(data["budget_max"]), data["brand"], data["model"], data["fuel"], data["transmission"], atoi(data["year_min"]))
+			_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message) VALUES($1,$2,'post_match',now()+interval '24 hours','Follow up on matched cars') ON CONFLICT DO NOTHING`, custID, leadID)
+		}
 	}
 
 	// Finance enquiry captured (income is INT: use 0, never '').

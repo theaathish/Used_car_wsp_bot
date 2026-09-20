@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +11,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 	"sellingbot/internal/api"
 	"sellingbot/internal/config"
 	"sellingbot/internal/db"
@@ -24,8 +24,12 @@ import (
 
 func main() {
 	cfg := config.Load()
-	if cfg.JWTSecret == "dev-secret-change-me" {
-		log.Printf("WARNING: JWT_SECRET is the dev default — set a 32-char secret in production or any restart logs everyone out and tokens are forgeable")
+	// Logger
+	logger := zerolog.New(os.Stderr).With().Timestamp().Logger()
+	if level, err := zerolog.ParseLevel(os.Getenv("LOG_LEVEL")); err == nil {
+		logger = logger.Level(level)
+	} else {
+		logger = logger.Level(zerolog.InfoLevel)
 	}
 	version := os.Getenv("RAILWAY_GIT_COMMIT_SHA")
 	if len(version) > 7 {
@@ -34,9 +38,9 @@ func main() {
 	if version == "" {
 		version = "dev"
 	}
-	log.Printf("sellingbot starting port=%s whatsapp=%v datadir=%s", cfg.Port, cfg.WhatsappEnabled, cfg.DataDir)
+	logger.Info().Msgf("sellingbot starting port=%s whatsapp=%v datadir=%s", cfg.Port, cfg.WhatsappEnabled, cfg.DataDir)
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		log.Fatal(err)
+		logger.Fatal().Err(err).Msg("")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -52,13 +56,13 @@ func main() {
 			break
 		}
 		if attempt >= 30 {
-			log.Fatalf("db connect: %v (set DATABASE_URL from the Postgres plugin)", err)
+			logger.Fatal().Msgf("db connect: %v (set DATABASE_URL from the Postgres plugin)", err)
 		}
 		wait := time.Duration(attempt*2) * time.Second
 		if wait > 20*time.Second {
 			wait = 20 * time.Second
 		}
-		log.Printf("db connect (attempt %d): %v — retrying in %s", attempt, err, wait)
+		logger.Info().Msgf("db connect (attempt %d): %v — retrying in %s", attempt, err, wait)
 		select {
 		case <-ctx.Done():
 			return
@@ -66,10 +70,16 @@ func main() {
 		}
 	}
 	if err := runEmbeddedMigrations(ctx, pool); err != nil {
-		log.Fatalf("migrate: %v", err)
+		logger.Fatal().Msgf("migrate: %v", err)
 	}
-	if err := db.SeedAdmin(ctx, pool, cfg.SeedEmail, cfg.SeedPassword); err != nil {
-		log.Fatalf("seed: %v", err)
+	created, err := db.SeedAdmin(ctx, pool, cfg.SeedEmail, cfg.SeedPassword)
+	if err != nil {
+		logger.Fatal().Msgf("seed: %v", err)
+	}
+	if created && cfg.SeedPasswordGenerated {
+		logger.Warn().Msgf("FIRST BOOT — admin created. Login: %s / %s  (change after first login; pin with ADMIN_SEED_EMAIL/ADMIN_SEED_PASSWORD)", cfg.SeedEmail, cfg.SeedPassword)
+	} else if created {
+		logger.Info().Msgf("admin seeded: %s", cfg.SeedEmail)
 	}
 
 	// Business timezone: DB setting wins, else TIMEZONE env, else IST.
@@ -79,15 +89,15 @@ func main() {
 		zoneName = dbZone
 	}
 	if _, err := whatsapp.SetZone(zoneName); err != nil {
-		log.Printf("bad timezone %q, using IST: %v", zoneName, err)
+		logger.Info().Msgf("bad timezone %q, using IST: %v", zoneName, err)
 		whatsapp.SetZone("Asia/Kuala_Lumpur")
 	} else {
-		log.Printf("business timezone: %s", whatsapp.ZoneName())
+		logger.Info().Msgf("business timezone: %s", whatsapp.ZoneName())
 	}
 
 	st, err := images.New(cfg.DataDir)
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal().Err(err).Msg("")
 	}
 	wa := whatsapp.New(pool, cfg.DataDir, cfg.WhatsappEnabled, cfg.DatabaseURL)
 	go wa.Start(ctx)
@@ -95,7 +105,7 @@ func main() {
 
 	webHTTP := http.FS(webdist.FS)
 
-	srv := &api.Server{Pool: pool, Secret: cfg.JWTSecret, WA: wa, Images: st, DataDir: cfg.DataDir, StartedAt: time.Now(), Version: version}
+	srv := &api.Server{Pool: pool, Secret: cfg.JWTSecret, WA: wa, Images: st, DataDir: cfg.DataDir, StartedAt: time.Now(), Version: version, Logger: &logger}
 	// Timeouts: a slow client must never hold a worker forever (Slowloris).
 	// Write covers local-disk images + JSON; 60s is generous, not infinite.
 	httpSrv := &http.Server{
@@ -108,9 +118,9 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("listening :%s", cfg.Port)
+		logger.Info().Msgf("listening :%s", cfg.Port)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
+			logger.Fatal().Err(err).Msg("")
 		}
 	}()
 	<-ctx.Done()

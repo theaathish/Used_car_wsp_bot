@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 	"sellingbot/internal/auth"
 	"sellingbot/internal/images"
 	"sellingbot/internal/whatsapp"
@@ -27,6 +27,7 @@ type Server struct {
 	DataDir   string
 	StartedAt time.Time
 	Version   string // git sha (Railway) or "dev" — surfaced in /api/health
+	Logger    *zerolog.Logger
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -247,6 +248,24 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.createBooking(w, r)
 	case strings.HasPrefix(p, "/api/bookings/") && r.Method == "PATCH":
 		s.patchBooking(w, r)
+	case p == "/api/payments" && r.Method == "GET":
+		s.listPayments(w, r)
+	case p == "/api/payments" && r.Method == "POST":
+		s.createPayment(w, r)
+	case strings.HasPrefix(p, "/api/payments/") && r.Method == "PATCH":
+		s.patchPayment(w, r)
+	case p == "/api/exchange-valuations" && r.Method == "GET":
+		s.listExchangeValuations(w, r)
+	case strings.HasPrefix(p, "/api/exchange-valuations/") && strings.HasSuffix(p, "/accept") && r.Method == "POST":
+		s.acceptExchange(w, r)
+	case strings.HasPrefix(p, "/api/exchange-valuations/") && strings.HasSuffix(p, "/reject") && r.Method == "POST":
+		s.rejectExchange(w, r)
+	case strings.HasPrefix(p, "/api/exchange-valuations/") && strings.HasSuffix(p, "/reopen") && r.Method == "POST":
+		s.reopenExchange(w, r)
+	case p == "/api/inspections" && r.Method == "GET":
+		s.listInspections(w, r)
+	case strings.HasPrefix(p, "/api/inspections/") && r.Method == "PATCH":
+		s.patchInspection(w, r)
 	case p == "/api/conversations" && r.Method == "GET":
 		s.listConversations(w, r)
 	case p == "/api/messages" && r.Method == "GET":
@@ -307,7 +326,7 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		reply, err := s.WA.HandleInbound(r.Context(), in.Phone, in.Name, in.Body)
 		if err != nil {
-			log.Printf("[api] simulate %s %q: %v", in.Phone, in.Body, err)
+			s.Logger.Error().Msgf("[api] simulate %s %q: %v", in.Phone, in.Body, err)
 			http.Error(w, `{"error":"handler failed"}`, http.StatusInternalServerError)
 			return
 		}

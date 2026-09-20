@@ -209,6 +209,36 @@ func candidatesTx(ctx context.Context, tx pgx.Tx, matchIDs string) []tdVehicle {
 	return out
 }
 
+// bookInspectionTx books a sell inspection slot (no vehicle needed).
+// Mirrors bookTestDriveTx: 409-style clash via unique index, savepoint-safe.
+// Returns (reply, reopened): reopened means the bot must ask again.
+func (w *Worker) bookInspectionTx(ctx context.Context, tx pgx.Tx, leadID, custID, body string) (string, bool) {
+	res := parseTestDrive(body, nil, time.Now())
+	// No vehicle in this flow: only date/time/past matter.
+	switch {
+	case res.needDate:
+		return "Which day works for the inspection? Reply *today*, *tomorrow* or a weekday — e.g. *tomorrow 11am*.", true
+	case res.needTime:
+		return "What time works? Reply e.g. *11am* or *4:30pm* with the day.", true
+	case res.past:
+		return "That time has already passed — please pick a future slot.", true
+	}
+	_, _ = tx.Exec(ctx, "SAVEPOINT insp_book")
+	if _, err := tx.Exec(ctx, `INSERT INTO inspections(lead_id,scheduled_at,notes) VALUES($1,$2,'via WhatsApp')`,
+		leadID, res.at); err != nil {
+		_, _ = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT insp_book")
+		log.Printf("[inspection] insert: %v", err)
+		var pg *pgconn.PgError
+		if errors.As(err, &pg) && pg.Code == "23505" {
+			return "That slot is already booked. Please pick another day or time.", true
+		}
+		return "I couldn't lock that slot — please try again or ask our team here.", true
+	}
+	_, _ = tx.Exec(ctx, "RELEASE SAVEPOINT insp_book")
+	_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message) VALUES($1,$2,'post_match',now()+interval '24 hours','Follow up after inspection') ON CONFLICT DO NOTHING`, custID, leadID)
+	return fmt.Sprintf("Inspection confirmed on %s. We'll remind you before. Our team will value your car after the inspection.",
+		FormatTime(res.at)), false
+}
 // bookTestDriveTx tries a real booking. Returns (reply, reopened): reopened
 // means the bot must ask again (missing info or taken slot).
 func (w *Worker) bookTestDriveTx(ctx context.Context, tx pgx.Tx, leadID, custID, body string, data map[string]string) (string, bool) {

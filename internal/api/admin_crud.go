@@ -147,6 +147,62 @@ func (s *Server) patchTestDrive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// GET /api/inspections — sell inspection appointments (same section as Test Drives).
+func (s *Server) listInspections(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Pool.Query(r.Context(), `SELECT i.id::text,c.phone,i.scheduled_at,i.status,i.notes FROM inspections i JOIN leads l ON l.id=i.lead_id JOIN customers c ON c.id=l.customer_id ORDER BY i.scheduled_at DESC LIMIT 50`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer rows.Close()
+	out := []any{}
+	for rows.Next() {
+		var id, phone, status, notes string
+		var ts any
+		_ = rows.Scan(&id, &phone, &ts, &status, &notes)
+		out = append(out, map[string]any{"id": id, "phone": phone, "scheduled_at": ts, "status": status, "notes": notes})
+	}
+	writeJSON(w, out)
+}
+
+// PATCH /api/inspections/{id} {status, scheduled_at}
+func (s *Server) patchInspection(w http.ResponseWriter, r *http.Request) {
+	id := idParam(r, "/api/inspections/")
+	var in struct {
+		Status      string `json:"status"`
+		ScheduledAt string `json:"scheduled_at"`
+	}
+	if err := readJSON(r, &in); err != nil || badUUID(w, id) {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	if in.Status != "" {
+		switch in.Status {
+		case "SCHEDULED", "COMPLETED", "CANCELLED", "NO_SHOW":
+		default:
+			http.Error(w, `{"error":"invalid status"}`, 400)
+			return
+		}
+		var prev string
+		_ = s.Pool.QueryRow(r.Context(), `SELECT status FROM inspections WHERE id=$1`, id).Scan(&prev)
+		if _, err := s.Pool.Exec(r.Context(), `UPDATE inspections SET status=$1 WHERE id=$2`, in.Status, id); err != nil {
+			http.Error(w, `{"error":"db"}`, 500)
+			return
+		}
+		audit(r.Context(), s.Pool, actorOf(r), "inspection.status", "inspection", id, prev, in.Status)
+	}
+	if in.ScheduledAt != "" {
+		if badTime(w, in.ScheduledAt) {
+			return
+		}
+		if _, err := s.Pool.Exec(r.Context(), `UPDATE inspections SET scheduled_at=$1 WHERE id=$2`, in.ScheduledAt, id); err != nil {
+			http.Error(w, `{"error":"db"}`, 500)
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 // PATCH /api/finance/{id} {status}
 func (s *Server) patchFinance(w http.ResponseWriter, r *http.Request) {
 	id := idParam(r, "/api/finance/")

@@ -58,8 +58,8 @@ func TestParserRegression(t *testing.T) {
 func TestStateFuzz(t *testing.T) {
 	states := []string{"NEW", "ASK_INTENT", "BUY_BUDGET", "BUY_BRAND", "BUY_MODEL",
 		"BUY_FUEL", "BUY_TRANS", "BUY_YEAR", "BUY_RESULTS", "FINANCE_INFO",
-		"TESTDRIVE_ASK", "SELL_CAR", "SELL_YEAR", "SELL_DETAILS", "SELL_SPECS",
-		"SELL_PHOTOS", "EXCHANGE_CURRENT", "EXCHANGE_WANT", "DONE", "BROKEN_STATE"}
+		"TESTDRIVE_ASK", "POST_TESTDRIVE_FOLLOWUP", "SELL_CAR", "SELL_YEAR", "SELL_DETAILS", "SELL_SPECS",
+		"SELL_PHOTOS", "SELL_INSPECTION", "EXCHANGE_CURRENT", "EXCHANGE_WANT", "DONE", "BROKEN_STATE"}
 	inputs := []string{
 		"", " ", "null", "{}", "[]", "null null", "' OR 1=1 --", "<script>alert(1)</script>",
 		"Automatic", "Diesel", "X1", "BMW", "20 lakh", "-5 lakh", "₹0", "999999999999999999999",

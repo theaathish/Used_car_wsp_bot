@@ -456,8 +456,12 @@ func TestHundred(t *testing.T) {
 		}},
 		{"TC76_sell_photos_done", func(t *testing.T) {
 			ns, _, _, status, _ := run("SELL_PHOTOS", "DONE", withData())
-			if ns != "DONE" || status != "FOLLOWUP" {
+			if ns != "SELL_INSPECTION" || status != "QUALIFIED" {
 				t.Fatalf("got %s %s", ns, status)
+			}
+			ns, _, _, status, patch := run("SELL_INSPECTION", "tomorrow 11am", withData())
+			if ns != "DONE" || status != "FOLLOWUP" || patch["inspection_raw"] == "" {
+				t.Fatalf("got %s %s %+v", ns, status, patch)
 			}
 		}},
 		{"TC77_sell_photos_cap", func(t *testing.T) {
@@ -491,9 +495,22 @@ func TestHundred(t *testing.T) {
 			}
 		}},
 		{"TC82_sell_done_followup", func(t *testing.T) {
-			ns, _, _, status, _ := run("SELL_PHOTOS", "DONE", withData("sell_brand", "Maruti"))
+			ns, _, _, status, _ := run("SELL_INSPECTION", "tomorrow 11am", withData("sell_brand", "Maruti"))
 			if ns != "DONE" || status != "FOLLOWUP" {
 				t.Fatalf("got %s %s", ns, status)
+			}
+			// Post-test-drive three-way classification.
+			ns, _, _, status, patch := run("POST_TESTDRIVE_FOLLOWUP", "1", withData())
+			if ns != "DONE" || status != "QUALIFIED" || patch["interest"] != "INTERESTED" {
+				t.Fatalf("got %s %s %+v", ns, status, patch)
+			}
+			ns, _, _, status, patch = run("POST_TESTDRIVE_FOLLOWUP", "2", withData())
+			if ns != "DONE" || status != "FOLLOWUP" || patch["interest"] != "THINKING" {
+				t.Fatalf("got %s %s %+v", ns, status, patch)
+			}
+			ns, _, _, status, patch = run("POST_TESTDRIVE_FOLLOWUP", "3", withData())
+			if ns != "DONE" || status != "LOST" || patch["interest"] != "NOT_INTERESTED" {
+				t.Fatalf("got %s %s %+v", ns, status, patch)
 			}
 		}},
 		// ---------- global/finance/td/done TC83-TC100 ----------

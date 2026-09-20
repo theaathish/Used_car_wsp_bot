@@ -141,9 +141,16 @@ func TestSellFlow(t *testing.T) {
 	if st != "SELL_PHOTOS" {
 		t.Fatalf("sell specs: %s", st)
 	}
-	st, _, _, status, _ := Next(st, "DONE", data)
+	st, _, _, status, patch := Next(st, "DONE", data)
+	if st != "SELL_INSPECTION" || status != "QUALIFIED" {
+		t.Fatalf("sell photos done -> inspection: %s %s", st, status)
+	}
+	for k, v := range patch {
+		data[k] = v
+	}
+	st, _, _, status, _ = Next(st, "tomorrow 11am", data)
 	if st != "DONE" || status != "FOLLOWUP" {
-		t.Fatalf("sell done: %s %s", st, status)
+		t.Fatalf("sell inspection done: %s %s", st, status)
 	}
 }
 

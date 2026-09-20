@@ -241,6 +241,10 @@ func (s *Server) createVehicle(w http.ResponseWriter, r *http.Request) {
 }
 
 // vehicleTransitions guards lifecycle (§12). Terminal states need ?force=1.
+// NOTE: auto-flow only drives AVAILABLE->RESERVED (createBooking),
+// RESERVED->AVAILABLE (cancel) and ->DELIVERED (patchBooking COMPLETED).
+// BOOKED/SOLD are manual-only via PATCH (e.g. retroactive cash sale);
+// DELIVERED superseded SOLD as the auto terminal state.
 var vehicleTransitions = map[string][]string{
 	"DRAFT":     {"AVAILABLE"},
 	"AVAILABLE": {"RESERVED", "BOOKED", "SOLD"},
@@ -656,7 +660,9 @@ func (s *Server) patchFollowup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listBookings(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Pool.Query(r.Context(), `SELECT b.id::text,c.phone,v.make,v.model,b.amount,b.status,b.delivery_at FROM bookings b JOIN leads l ON l.id=b.lead_id JOIN customers c ON c.id=l.customer_id JOIN vehicles v ON v.id=b.vehicle_id ORDER BY b.created_at DESC LIMIT 50`)
+	rows, err := s.Pool.Query(r.Context(), `SELECT b.id::text,c.phone,v.make,v.model,b.amount,b.status,b.delivery_at,
+		COALESCE((SELECT p.status FROM payments p WHERE p.booking_id=b.id ORDER BY p.created_at DESC LIMIT 1),'')
+		FROM bookings b JOIN leads l ON l.id=b.lead_id JOIN customers c ON c.id=l.customer_id JOIN vehicles v ON v.id=b.vehicle_id ORDER BY b.created_at DESC LIMIT 50`)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
@@ -664,11 +670,11 @@ func (s *Server) listBookings(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []any{}
 	for rows.Next() {
-		var id, phone, make, model, status string
+		var id, phone, make, model, status, payStatus string
 		var amount int
 		var del any
-		_ = rows.Scan(&id, &phone, &make, &model, &amount, &status, &del)
-		out = append(out, map[string]any{"id": id, "phone": phone, "vehicle": make + " " + model, "amount": amount, "status": status, "delivery_at": del})
+		_ = rows.Scan(&id, &phone, &make, &model, &amount, &status, &del, &payStatus)
+		out = append(out, map[string]any{"id": id, "phone": phone, "vehicle": make + " " + model, "amount": amount, "status": status, "delivery_at": del, "payment_status": payStatus})
 	}
 	writeJSON(w, out)
 }
@@ -723,6 +729,13 @@ func (s *Server) createBooking(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
 	}
+	// No payment on WhatsApp: notify buyer that sales will follow up offline.
+	// Best-effort: Send queues to outbox when disconnected, never fails booking.
+	var phone string
+	_ = s.Pool.QueryRow(r.Context(), `SELECT c.phone FROM leads l JOIN customers c ON c.id=l.customer_id WHERE l.id=$1`, in.LeadID).Scan(&phone)
+	if phone != "" {
+		_ = s.WA.Send(r.Context(), phone, "Thanks! Our sales team will contact you shortly regarding payment and next steps.")
+	}
 	writeJSON(w, map[string]any{"id": id})
 }
 
@@ -748,6 +761,8 @@ func (s *Server) patchBooking(w http.ResponseWriter, r *http.Request) {
 			_, _ = s.Pool.Exec(r.Context(), `UPDATE vehicles SET status='AVAILABLE', updated_at=now() WHERE id=(SELECT vehicle_id FROM bookings WHERE id=$1) AND status IN ('RESERVED','BOOKED')`, id)
 		}
 		if st == "DELIVERED" || st == "COMPLETED" {
+		// NOTE: bypasses vehicleTransitions (RESERVED->DELIVERED not in guard).
+		// Guard in patchVehicle is manual-PATCH only; booking completion writes directly.
 			_, _ = s.Pool.Exec(r.Context(), `UPDATE bookings SET status='COMPLETED', updated_at=now() WHERE id=$1`, id)
 			_, _ = s.Pool.Exec(r.Context(), `UPDATE vehicles SET status='DELIVERED', updated_at=now() WHERE id=(SELECT vehicle_id FROM bookings WHERE id=$1)`, id)
 			_, _ = s.Pool.Exec(r.Context(), `UPDATE leads SET status='CONVERTED', updated_at=now() WHERE id=(SELECT lead_id FROM bookings WHERE id=$1)`, id)
@@ -814,11 +829,12 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	var leads, vehicles, td, fu, bk int
+	var leads, vehicles, td, fu, bk, insp int
 	_ = s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM leads`).Scan(&leads)
 	_ = s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM vehicles WHERE status='AVAILABLE'`).Scan(&vehicles)
 	_ = s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM test_drives WHERE status='SCHEDULED'`).Scan(&td)
 	_ = s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM followups WHERE status='pending'`).Scan(&fu)
 	_ = s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM bookings WHERE status IN ('PENDING','CONFIRMED')`).Scan(&bk)
-	writeJSON(w, map[string]any{"leads": leads, "available_vehicles": vehicles, "scheduled_test_drives": td, "pending_followups": fu, "open_bookings": bk})
+	_ = s.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM inspections WHERE status='SCHEDULED'`).Scan(&insp)
+	writeJSON(w, map[string]any{"leads": leads, "available_vehicles": vehicles, "scheduled_test_drives": td, "pending_followups": fu, "open_bookings": bk, "scheduled_inspections": insp})
 }

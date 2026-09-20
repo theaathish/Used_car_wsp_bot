@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -462,10 +464,10 @@ func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		BookingID       string `json:"booking_id"`
-		Rating          int    `json:"rating"`
-		Review          string `json:"review"`
-		ReferralSource  string `json:"referral_source"`
+		BookingID        string `json:"booking_id"`
+		Rating           int    `json:"rating"`
+		Review           string `json:"review"`
+		ReferralSource   string `json:"referral_source"`
 		ReferredCustomer string `json:"referred_customer"`
 	}
 	if err := readJSON(r, &in); err != nil || in.BookingID == "" {
@@ -581,6 +583,295 @@ func (s *Server) patchConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Status != "" {
 		_, _ = s.Pool.Exec(r.Context(), `UPDATE conversations SET status=$1 WHERE id=$2`, in.Status, id)
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// Payments: manual offline log only. No auto transitions, no WhatsApp logic.
+func validPaymentStatus(s string) bool {
+	switch s {
+	case "PENDING", "RECEIVED", "PARTIAL", "REFUNDED":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) listPayments(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Pool.Query(r.Context(), `SELECT p.id::text,p.booking_id::text,c.phone,v.make,v.model,p.amount,p.method,p.status,p.recorded_by,p.recorded_at,p.notes
+		FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN leads l ON l.id=b.lead_id JOIN customers c ON c.id=l.customer_id JOIN vehicles v ON v.id=b.vehicle_id
+		ORDER BY p.created_at DESC LIMIT 50`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer rows.Close()
+	out := []any{}
+	for rows.Next() {
+		var id, bid, phone, make, model, method, status, by, notes string
+		var amount int
+		var ts, rec any
+		_ = rows.Scan(&id, &bid, &phone, &make, &model, &amount, &method, &status, &by, &rec, &notes)
+		_ = ts
+		out = append(out, map[string]any{"id": id, "booking_id": bid, "phone": phone, "vehicle": make + " " + model,
+			"amount": amount, "method": method, "status": status, "recorded_by": by, "recorded_at": rec, "notes": notes})
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) createPayment(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		BookingID string `json:"booking_id"`
+		Amount    int    `json:"amount"`
+		Method    string `json:"method"`
+		Status    string `json:"status"`
+		Notes     string `json:"notes"`
+	}
+	if err := readJSON(r, &in); err != nil || in.BookingID == "" {
+		http.Error(w, `{"error":"booking_id required"}`, 400)
+		return
+	}
+	if badUUID(w, in.BookingID) {
+		return
+	}
+	if in.Amount < 0 {
+		http.Error(w, `{"error":"amount must be >= 0"}`, 400)
+		return
+	}
+	if in.Status == "" {
+		in.Status = "PENDING"
+	}
+	if !validPaymentStatus(in.Status) {
+		http.Error(w, `{"error":"status must be PENDING|RECEIVED|PARTIAL|REFUNDED"}`, 400)
+		return
+	}
+	var exists bool
+	_ = s.Pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM bookings WHERE id=$1)`, in.BookingID).Scan(&exists)
+	if !exists {
+		http.Error(w, `{"error":"booking not found"}`, 404)
+		return
+	}
+	by := ""
+	if cl := auth.Current(r); cl != nil {
+		by = cl.Email
+	}
+	id := uuid.NewString()
+	if _, err := s.Pool.Exec(r.Context(), `INSERT INTO payments(id,booking_id,amount,method,status,recorded_by,notes) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+		id, in.BookingID, in.Amount, in.Method, in.Status, by, in.Notes); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	audit(r.Context(), s.Pool, by, "payment.create", "payment", id, "", in.Status)
+	writeJSON(w, map[string]any{"id": id})
+}
+
+func (s *Server) patchPayment(w http.ResponseWriter, r *http.Request) {
+	id := idParam(r, "/api/payments/")
+	if badUUID(w, id) {
+		return
+	}
+	var in map[string]any
+	if err := readJSON(r, &in); err != nil || id == "" {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	allowed := map[string]bool{"status": true, "amount": true, "notes": true}
+	actor := ""
+	if cl := auth.Current(r); cl != nil {
+		actor = cl.Email
+	}
+	for k, v := range in {
+		if !allowed[k] {
+			continue
+		}
+		if k == "status" {
+			st, _ := v.(string)
+			if !validPaymentStatus(st) {
+				http.Error(w, `{"error":"status must be PENDING|RECEIVED|PARTIAL|REFUNDED"}`, 400)
+				return
+			}
+		}
+		if k == "amount" {
+			if f, ok := v.(float64); ok && f < 0 {
+				http.Error(w, `{"error":"amount must be >= 0"}`, 400)
+				return
+			}
+		}
+		var prev any
+		_ = s.Pool.QueryRow(r.Context(), `SELECT `+k+` FROM payments WHERE id=$1`, id).Scan(&prev)
+		if _, err := s.Pool.Exec(r.Context(), `UPDATE payments SET `+k+`=$1, updated_at=now() WHERE id=$2`, v, id); err != nil {
+			http.Error(w, `{"error":"db"}`, 500)
+			return
+		}
+		audit(r.Context(), s.Pool, actor, "payment."+k, "payment", id, fmt.Sprintf("%v", prev), fmt.Sprintf("%v", v))
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// Exchange valuations: trade-in queue mirroring sell_requests accept/reject/reopen.
+func (s *Server) listExchangeValuations(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Pool.Query(r.Context(), `SELECT e.id::text,c.phone,e.current_car,e.want,e.status FROM exchange_valuations e JOIN leads l ON l.id=e.lead_id JOIN customers c ON c.id=l.customer_id ORDER BY e.created_at DESC LIMIT 50`)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer rows.Close()
+	out := []any{}
+	for rows.Next() {
+		var id, phone, cur, want, status string
+		_ = rows.Scan(&id, &phone, &cur, &want, &status)
+		out = append(out, map[string]any{"id": id, "phone": phone, "current_car": cur, "want": want, "status": status})
+	}
+	writeJSON(w, out)
+}
+
+func exchangeID(r *http.Request, suffix string) (string, bool) {
+	p := r.URL.Path[len("/api/exchange-valuations/"):]
+	if !strings.HasSuffix(p, suffix) {
+		return "", false
+	}
+	id := p[:len(p)-len(suffix)]
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+func (s *Server) acceptExchange(w http.ResponseWriter, r *http.Request) {
+	id, ok := exchangeID(r, "/accept")
+	if !ok || badUUID(w, id) {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	var prev, leadID, currentCar, want string
+	err := s.Pool.QueryRow(r.Context(), `SELECT status, lead_id::text, current_car, want FROM exchange_valuations WHERE id=$1`, id).Scan(&prev, &leadID, &currentCar, &want)
+	if err != nil {
+		http.Error(w, `{"error":"not found"}`, 404)
+		return
+	}
+	if prev != "VALUATION_PENDING" {
+		http.Error(w, `{"error":"only VALUATION_PENDING can be accepted"}`, 409)
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	defer tx.Rollback(ctx)
+	// parse currentCar for brand, model, year
+	var brand, model, yearStr string
+	var year int
+	parts := strings.Fields(currentCar)
+	if len(parts) >= 3 {
+		brand = parts[0]
+		model = parts[1]
+		yearStr = parts[len(parts)-1]
+		y, err := strconv.Atoi(yearStr)
+		if err == nil {
+			year = y
+			// If year is plausible (e.g., between 1980 and current year+2)
+			if year < 1980 || year > time.Now().Year()+2 {
+				year = 0
+			}
+		} else {
+			year = 0
+		}
+	} else if len(parts) == 2 {
+		brand = parts[0]
+		model = parts[1]
+		year = 0
+	} else if len(parts) == 1 {
+		brand = parts[0]
+		model = ""
+		year = 0
+	} else {
+		brand = ""
+		model = ""
+		year = 0
+	}
+	fuel := ""
+	transmission := ""
+	km := 0
+	price := 0 // placeholder
+	description := strings.TrimSpace("[EXCHANGED] " + currentCar + " " + want)
+	if description == "" {
+		description = currentCar
+	}
+	vid := uuid.NewString()
+	_, err = tx.Exec(ctx, `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description,acquired_via)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'AVAILABLE',$9,$10)`,
+		vid, brand, model, year, price, fuel, transmission, km, description, vid, "exchange")
+	if err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	// Link WhatsApp photos from conversations of this lead to the new vehicle
+	var photoPaths []string
+	rows, err := tx.Query(ctx, `SELECT DISTINCT m.media_path FROM messages m
+		JOIN conversations c ON c.id=m.conversation_id
+		WHERE c.lead_id=$1 AND m.media_path<>'' ORDER BY m.media_path`, leadID)
+	if err == nil {
+		for rows.Next() {
+			var mp string
+			if err := rows.Scan(&mp); err == nil {
+				photoPaths = append(photoPaths, mp)
+			}
+		}
+		rows.Close()
+	}
+	for n, mp := range photoPaths {
+		_, _ = tx.Exec(ctx, `INSERT INTO vehicle_images(vehicle_id,path,sort_order) VALUES($1,$2,$3)`, vid, mp, n)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	if _, err := s.Pool.Exec(r.Context(), `UPDATE exchange_valuations SET status='ACCEPTED' WHERE id=$1`, id); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	actor := ""
+	if cl := auth.Current(r); cl != nil {
+		actor = cl.Email
+	}
+	audit(r.Context(), s.Pool, actor, "exchange.accept", "exchange_valuation", id, prev, "ACCEPTED")
+	writeJSON(w, map[string]any{"id": id, "vehicle_id": vid})
+}
+func (s *Server) rejectExchange(w http.ResponseWriter, r *http.Request) {
+	id, ok := exchangeID(r, "/reject")
+	if !ok || badUUID(w, id) {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	var prev string
+	_ = s.Pool.QueryRow(r.Context(), `SELECT status FROM exchange_valuations WHERE id=$1`, id).Scan(&prev)
+	if prev == "" {
+		http.Error(w, `{"error":"not found"}`, 404)
+		return
+	}
+	if _, err := s.Pool.Exec(r.Context(), `UPDATE exchange_valuations SET status='REJECTED' WHERE id=$1`, id); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
+	}
+	actor := ""
+	if cl := auth.Current(r); cl != nil {
+		actor = cl.Email
+	}
+	audit(r.Context(), s.Pool, actor, "exchange.reject", "exchange_valuation", id, prev, "REJECTED")
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) reopenExchange(w http.ResponseWriter, r *http.Request) {
+	id, ok := exchangeID(r, "/reopen")
+	if !ok || badUUID(w, id) {
+		http.Error(w, `{"error":"bad request"}`, 400)
+		return
+	}
+	if _, err := s.Pool.Exec(r.Context(), `UPDATE exchange_valuations SET status='VALUATION_PENDING' WHERE id IN ($1) AND status IN ('REJECTED','ACCEPTED')`, id); err != nil {
+		http.Error(w, `{"error":"db"}`, 500)
+		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }

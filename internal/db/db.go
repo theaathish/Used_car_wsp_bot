@@ -51,22 +51,24 @@ func MigrateFromDir(ctx context.Context, pool *pgxpool.Pool, files map[string]st
 	return nil
 }
 
-func SeedAdmin(ctx context.Context, pool *pgxpool.Pool, email, password string) error {
+// SeedAdmin creates the initial admin. Returns true only when it actually
+// created the user (so the caller can print generated credentials once).
+func SeedAdmin(ctx context.Context, pool *pgxpool.Pool, email, password string) (bool, error) {
 	if email == "" || password == "" {
-		return nil
+		return false, nil
 	}
 	var exists bool
 	err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE email=$1)`, email).Scan(&exists)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if exists {
-		return nil
+		return false, nil
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = pool.Exec(ctx, `INSERT INTO users(email,password_hash,role) VALUES($1,$2,'admin')`, email, string(hash))
-	return err
+	return err == nil, err
 }

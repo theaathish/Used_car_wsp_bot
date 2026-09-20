@@ -505,7 +505,7 @@ func promptFor(state string) string {
 	case "BUY_MODEL":
 		return "Which model? Reply the name, or *0* for any (e.g. Swift, Creta, X1, 0)"
 	case "BUY_FUEL":
-		return "Fuel? Reply 1 Petrol / 2 Diesel / 3 CNG / 4 Electric / 0 Any"
+		return "Fuel? Reply 1 Petrol / 2 Diesel / 3 CNG / 4 Electric / 5 Hybrid / 0 Any"
 	case "BUY_TRANS":
 		return "Transmission? Reply 1 Manual / 2 Automatic / 0 Any"
 	case "BUY_YEAR":
@@ -847,6 +847,42 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case "TESTDRIVE_ASK":
 		patch["testdrive_raw"] = strings.TrimSpace(body)
 		return "DONE", "Thanks! Your test drive request is recorded. We'll confirm the slot shortly.", "", "TEST_DRIVE", patch
+	case "POST_TESTDRIVE_FOLLOWUP":
+		// Post-test-drive classification: same three-way split as BUY_RESULTS
+		// early signal, tagged with context=post_testdrive by the caller.
+		// Numbered menu first (scheduler prompt), text fallbacks below.
+		if c := parseChoice(body); c >= 1 && c <= 3 {
+			switch c {
+			case 1:
+				patch["interest"] = "INTERESTED"
+				patch["post_td"] = "1"
+				return "DONE", "Great! Our salesperson will call you shortly to take it forward.", "", "QUALIFIED", patch
+			case 2:
+				patch["interest"] = "THINKING"
+				patch["post_td"] = "1"
+				return "DONE", "Sure, take your time! When should we follow up — tomorrow or next week?", "", "FOLLOWUP", patch
+			case 3:
+				patch["interest"] = "NOT_INTERESTED"
+				patch["post_td"] = "1"
+				return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY*, *SELL* or *EXCHANGE* anytime.", "", "LOST", patch
+			}
+		}
+		if strings.Contains(b, "not interested") || strings.Contains(b, "not intrested") || strings.Contains(b, "no thanks") || strings.Contains(b, "drop") {
+			patch["interest"] = "NOT_INTERESTED"
+			patch["post_td"] = "1"
+			return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY*, *SELL* or *EXCHANGE* anytime.", "", "LOST", patch
+		}
+		if strings.Contains(b, "think") || strings.Contains(b, "decide") || strings.Contains(b, "later") || strings.Contains(b, "call me back") || strings.Contains(b, "thinking") {
+			patch["interest"] = "THINKING"
+			patch["post_td"] = "1"
+			return "DONE", "Sure, take your time! When should we follow up — tomorrow or next week?", "", "FOLLOWUP", patch
+		}
+		if strings.Contains(b, "interested") || strings.Contains(b, "intrested") || strings.Contains(b, "i like") {
+			patch["interest"] = "INTERESTED"
+			patch["post_td"] = "1"
+			return "DONE", "Great! Our salesperson will call you shortly to take it forward.", "", "QUALIFIED", patch
+		}
+		return "POST_TESTDRIVE_FOLLOWUP", "How did the test drive go? Reply 1 Interested / 2 Still thinking / 3 Not interested", "", "", patch
 	case "SELL_CAR":
 		br, mo := SplitBrandModel(body)
 		patch["sell_brand"] = br
@@ -902,17 +938,20 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case "SELL_PHOTOS":
 		// "1" is the tap-style DONE (photos have no numbers, so no clash).
 		if strings.Contains(b, "done") || parseChoice(body) == 1 {
-			return "DONE", "Thank you! Your sell request is recorded with status VALUATION_PENDING. Our team will call you for free inspection & valuation.", "SELL", "FOLLOWUP", patch
+			return "SELL_INSPECTION", "Thanks! Let's schedule an inspection. What date/time works? (e.g. *tomorrow 11am*)", "SELL", "QUALIFIED", patch
 		}
 		if n, err := strconv.Atoi(data["sell_photos"]); err == nil && n >= 10 {
-			return "SELL_PHOTOS", "10 photos are enough, thank you! Reply *DONE* and we'll proceed to valuation.", "SELL", "QUALIFIED", patch
+			return "SELL_PHOTOS", "10 photos are enough, thank you! Reply *DONE* and we'll schedule the inspection.", "SELL", "QUALIFIED", patch
 		}
 		// Plain text is never a photo: only HandleMedia counts photos.
 		// (Flow-bug: every typed word inflated sell_photos before.)
 		return "SELL_PHOTOS", "Please send car photos here on WhatsApp (front, rear, side, interior, dashboard, tyres). Reply *1* or DONE after sending.", "SELL", "QUALIFIED", patch
+	case "SELL_INSPECTION":
+		patch["inspection_raw"] = strings.TrimSpace(body)
+		return "DONE", "Thanks! Your inspection request is recorded. We'll confirm the slot shortly.", "SELL", "FOLLOWUP", patch
 	case "EXCHANGE_CURRENT":
 		patch["exchange_current"] = strings.TrimSpace(body)
-		return "EXCHANGE_WANT", "What new car are you looking for? (budget + brand, e.g. Creta under RM 200,000)", "EXCHANGE", "QUALIFIED", patch
+		return "EXCHANGE_WANT", "Thanks! We'll value your current car and get back to you shortly. What new car are you looking for? (budget + brand, e.g. Creta under RM 200,000)", "EXCHANGE", "QUALIFIED", patch
 	case "EXCHANGE_WANT":
 		patch["exchange_want"] = strings.TrimSpace(body)
 		for k, v := range ExtractAll(body) {

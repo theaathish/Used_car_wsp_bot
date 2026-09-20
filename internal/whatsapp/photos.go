@@ -26,6 +26,10 @@ type photoJob struct {
 	caption string
 }
 
+// DetailViewPhotoLimit caps WhatsApp sends for a full vehicle detail view.
+// DB allows 10 images/vehicle; the teaser in match lists stays at 1 (see worker.go).
+const DetailViewPhotoLimit = 6
+
 // SendImage delivers a photo with caption. Stub-logs when disconnected so
 // simulators and tests flow through without a live session.
 func (w *Worker) SendImage(ctx context.Context, phone, absPath, caption string) error {
@@ -172,7 +176,7 @@ func (w *Worker) vehicleByID(ctx context.Context, tx pgx.Tx, id string) (vehicle
 		commaDesc(desc), extra,
 		notAvailNote(status))
 	vd.caption = fmt.Sprintf("%s %s %d — RM%d", mk, md, year, price)
-	vd.photos = w.vehiclePhotosTx(ctx, tx, id, 6)
+	vd.photos = w.vehiclePhotosTx(ctx, tx, id, DetailViewPhotoLimit)
 	return vd, true
 }
 
