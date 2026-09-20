@@ -133,7 +133,7 @@ func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.Pool.Query(r.Context(), `SELECT id::text,make,model,year,price,fuel,transmission,km,status,description,
 		COALESCE(stock_no,''),COALESCE(stock_location,''),COALESCE(model_code,''),COALESCE(model_description,''),
 		COALESCE(reg_num,''),COALESCE(chassis,''),COALESCE(colour,''),COALESCE(upholstery,''),
-		COALESCE(stock_status,''),COALESCE(warranty,''),COALESCE(claims,'')
+		COALESCE(stock_status,''),COALESCE(warranty,''),COALESCE(claims,''),COALESCE(acquired_via,'')
 		FROM vehicles`+where+` ORDER BY created_at DESC LIMIT $1 OFFSET $2`, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
@@ -143,14 +143,15 @@ func (s *Server) listVehicles(w http.ResponseWriter, r *http.Request) {
 	out := []any{}
 	for rows.Next() {
 		var id, make, model, fuel, trans, status, desc string
-		var stockNo, stockLoc, modelCode, modelDesc, regNum, chassis, colour, uphol, stockStatus, warranty, claims string
+		var stockNo, stockLoc, modelCode, modelDesc, regNum, chassis, colour, uphol, stockStatus, warranty, claims, acquiredVia string
 		var year, price, km int
 		_ = rows.Scan(&id, &make, &model, &year, &price, &fuel, &trans, &km, &status, &desc,
-			&stockNo, &stockLoc, &modelCode, &modelDesc, &regNum, &chassis, &colour, &uphol, &stockStatus, &warranty, &claims)
+			&stockNo, &stockLoc, &modelCode, &modelDesc, &regNum, &chassis, &colour, &uphol, &stockStatus, &warranty, &claims, &acquiredVia)
 		imgs := s.vehicleImages(r, id)
 		out = append(out, map[string]any{"id": id, "make": make, "model": model, "year": year, "price": price, "fuel": fuel, "transmission": trans, "km": km, "status": status, "description": desc, "images": imgs,
 			"stock_no": stockNo, "stock_location": stockLoc, "model_code": modelCode, "model_description": modelDesc,
-			"reg_num": regNum, "chassis": chassis, "colour": colour, "upholstery": uphol, "stock_status": stockStatus, "warranty": warranty, "claims": claims})
+			"reg_num": regNum, "chassis": chassis, "colour": colour, "upholstery": uphol, "stock_status": stockStatus, "warranty": warranty, "claims": claims,
+			"acquired_via": acquiredVia})
 	}
 	writeJSON(w, out)
 }
@@ -200,6 +201,7 @@ func (s *Server) createVehicle(w http.ResponseWriter, r *http.Request) {
 		StockNo, StockLocation, ModelCode, ModelDescription  string
 		RegNum, Chassis, OldRegNum, Purchaser, RegDate       string
 		Colour, Upholstery, StockStatus, Warranty, Claims    string
+		AcquiredVia                                          string
 	}
 	if err := readJSON(r, &in); err != nil || in.Make == "" || in.Model == "" {
 		http.Error(w, `{"error":"make+model required"}`, 400)
@@ -228,11 +230,11 @@ func (s *Server) createVehicle(w http.ResponseWriter, r *http.Request) {
 	}
 	id := uuid.NewString()
 	_, err := s.Pool.Exec(r.Context(), `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description,
-		stock_no,stock_location,model_code,model_description,reg_num,chassis,old_reg_num,purchaser,reg_date,colour,upholstery,stock_status,warranty,claims)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+		stock_no,stock_location,model_code,model_description,reg_num,chassis,old_reg_num,purchaser,reg_date,colour,upholstery,stock_status,warranty,claims,acquired_via)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 		ON CONFLICT DO NOTHING`,
 		id, in.Make, in.Model, in.Year, in.Price, in.Fuel, in.Transmission, in.Km, in.Status, in.Description,
-		in.StockNo, in.StockLocation, in.ModelCode, in.ModelDescription, in.RegNum, in.Chassis, in.OldRegNum, in.Purchaser, in.RegDate, in.Colour, in.Upholstery, in.StockStatus, in.Warranty, in.Claims)
+		in.StockNo, in.StockLocation, in.ModelCode, in.ModelDescription, in.RegNum, in.Chassis, in.OldRegNum, in.Purchaser, in.RegDate, in.Colour, in.Upholstery, in.StockStatus, in.Warranty, in.Claims, in.AcquiredVia)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
@@ -295,7 +297,7 @@ func (s *Server) patchVehicle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	allowed := map[string]bool{"make": true, "model": true, "year": true, "price": true, "fuel": true, "transmission": true, "km": true, "status": true, "description": true,
-		"stock_no": true, "stock_location": true, "model_code": true, "model_description": true, "reg_num": true, "chassis": true, "old_reg_num": true, "purchaser": true, "reg_date": true, "colour": true, "upholstery": true, "stock_status": true, "warranty": true, "claims": true}
+		"stock_no": true, "stock_location": true, "model_code": true, "model_description": true, "reg_num": true, "chassis": true, "old_reg_num": true, "purchaser": true, "reg_date": true, "colour": true, "upholstery": true, "stock_status": true, "warranty": true, "claims": true, "acquired_via": true}
 	for k, v := range in {
 		if !allowed[k] {
 			continue

@@ -33,10 +33,10 @@ function fmtMoney(n) {
   n = +n || 0;
   return 'RM ' + n.toLocaleString('en-MY');
 }
-const PILLMAP = {AVAILABLE: 'green', DELIVERED: 'green', COMPLETED: 'green', CONVERTED: 'green', INTERESTED: 'green', SENT: 'green',
-  RESERVED: 'amber', PENDING: 'amber', VALUATION_PENDING: 'amber', THINKING: 'amber', FOLLOWUP: 'amber', TEST_DRIVE: 'amber', SCHEDULED: 'amber',
+const PILLMAP = {AVAILABLE: 'green', DELIVERED: 'green', COMPLETED: 'green', CONVERTED: 'green', INTERESTED: 'green', SENT: 'green', RECEIVED: 'green',
+  RESERVED: 'amber', PENDING: 'amber', VALUATION_PENDING: 'amber', THINKING: 'amber', FOLLOWUP: 'amber', TEST_DRIVE: 'amber', SCHEDULED: 'amber', PARTIAL: 'amber',
   BOOKED: 'blue', CONFIRMED: 'blue', NEW: 'blue', CONTACTED: 'blue', QUALIFIED: 'blue', BUY: 'blue', SELL: 'blue', EXCHANGE: 'blue',
-  SOLD: 'gray', LOST: 'gray', NOT_INTERESTED: 'gray', CANCELLED: 'gray', DONE: 'gray', FAILED_PERMANENTLY: 'red', FAILED: 'red'};
+  SOLD: 'gray', LOST: 'gray', NOT_INTERESTED: 'gray', CANCELLED: 'gray', DONE: 'gray', REFUNDED: 'gray', NO_SHOW: 'gray', FAILED_PERMANENTLY: 'red', FAILED: 'red'};
 function pill(v) {
   v = v || '—';
   const c = PILLMAP[String(v).toUpperCase()] || 'gray';
@@ -56,8 +56,8 @@ function login() {
 function logout() { localStorage.removeItem('token'); location.reload(); }
 
 /* ---------- nav ---------- */
-const NAV = [['dash', 'Dashboard'], ['wa', 'WhatsApp'], ['cust', 'Customers'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
-  ['td', 'Test Drives'], ['fu', 'Follow-ups'], ['bk', 'Bookings'], ['neg', 'Negotiations'], ['fin', 'Finance'],
+const NAV = [['dash', 'Dashboard'], ['guide', 'Guide'], ['wa', 'WhatsApp'], ['cust', 'Customers'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
+  ['td', 'Test Drives'], ['insp', 'Inspections'], ['fu', 'Follow-ups'], ['bk', 'Bookings'], ['pay', 'Payments'], ['neg', 'Negotiations'], ['fin', 'Finance'],
   ['sell', 'Sell Requests'], ['exc', 'Exchange'], ['rev', 'Reviews'], ['team', 'Team'], ['set', 'Settings'], ['sim', 'Simulator']];
 function buildNav() {
   document.getElementById('nav').innerHTML = NAV.filter(function (n) { return n[0] !== 'team' || ME.role === 'admin'; })
@@ -84,7 +84,7 @@ async function boot() {
   ['NEW', 'CONTACTED', 'QUALIFIED', 'TEST_DRIVE', 'FOLLOWUP', 'BOOKED', 'CONVERTED', 'LOST'].forEach(function (s) {
     const o = document.createElement('option'); o.textContent = s; st.appendChild(o);
   });
-  dash(); waStatus(); loadCust(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadFU(); loadBK(); loadNG(); loadFIN(); loadSELL(); loadEXC(); loadRV(); loadUsers(); loadSettings();
+  dash(); waStatus(); loadCust(); loadLeads(); loadConv(); renderVeh(); loadTD(); loadINSP(); loadFU(); loadBK(); loadPAY(); loadNG(); loadFIN(); loadSELL(); loadEXC(); loadRV(); loadUsers(); loadSettings();
 }
 async function reloadLookups() {
   const l = await api('GET', '/api/leads?limit=200'); LEADS = l.ok ? l.data : [];
@@ -131,17 +131,21 @@ async function dash() {
     return '<div class="card" onclick="show(\'' + c[2] + '\')"><div class="l">' + c[1] + '</div><b>' + (j[c[0]] || 0) + '</b></div>';
   }).join('');
   const fu = await api('GET', '/api/followups'); const sell = await api('GET', '/api/sell-requests'); const td = await api('GET', '/api/test-drives');
+  const insp = await api('GET', '/api/inspections');
   let att = '';
   const pend = (fu.ok ? fu.data : []).filter(function (f) { return f.status === 'pending'; }).slice(0, 5);
   const val = (sell.ok ? sell.data : []).filter(function (s) { return s.status === 'VALUATION_PENDING'; });
   const upcoming = (td.ok ? td.data : []).filter(function (t) { return t.status === 'SCHEDULED'; }).slice(0, 5);
+  const inspUp = (insp.ok ? insp.data : []).filter(function (t) { return t.status === 'SCHEDULED'; }).slice(0, 5);
   document.getElementById('badge-fu').textContent = pend.length || '';
   document.getElementById('badge-sell').textContent = val.length || '';
+  document.getElementById('badge-insp').textContent = inspUp.length || '';
   document.getElementById('badge-leads').textContent = j.leads || '';
-  if (!pend.length && !val.length && !upcoming.length) att = '<div class="empty">All clear — nothing waiting.</div>';
+  if (!pend.length && !val.length && !upcoming.length && !inspUp.length) att = '<div class="empty">All clear — nothing waiting.</div>';
   att += pend.map(function (f) { return '<div>• Follow-up for <b>' + esc(f.phone) + '</b> — ' + esc(f.type) + ' <span class="muted small">' + fmtDate(f.scheduled_at) + '</span></div>'; }).join('');
   att += val.map(function (s) { return '<div>• Valuation: <b>' + esc(s.brand) + ' ' + esc(s.model) + '</b> (' + esc(s.phone) + ')</div>'; }).join('');
   att += upcoming.map(function (t) { return '<div>• Test drive: <b>' + esc(t.vehicle) + '</b> (' + esc(t.phone) + ') <span class="muted small">' + fmtDate(t.scheduled_at) + '</span></div>'; }).join('');
+  att += inspUp.map(function (t) { return '<div>• Inspection: <b>' + esc(t.phone) + '</b> <span class="muted small">' + fmtDate(t.scheduled_at) + '</span></div>'; }).join('');
   document.getElementById('attention').innerHTML = att;
   const c = await api('GET', '/api/conversations?limit=5');
   document.getElementById('recentConv').innerHTML = c.ok ? c.data.map(function (x) {
@@ -318,6 +322,7 @@ function renderVeh() {
       '<div class="spec">' + [o.fuel, o.transmission].filter(Boolean).join(' · ') + (o.fuel || o.transmission ? ' · ' : '') + Number(o.km || 0).toLocaleString('en-MY') + ' km</div>' +
       ((o.stock_no || o.reg_num || o.colour || o.stock_location) ? '<div class="spec">' + [o.stock_no, o.reg_num, o.colour, o.stock_location].filter(Boolean).map(esc).join(' · ') + '</div>' : '') +
       ((o.stock_status || o.warranty) ? '<div class="spec">' + [o.stock_status, o.warranty].filter(Boolean).map(esc).join(' · ') + '</div>' : '') +
+      (o.acquired_via ? '<div class="spec">Via: ' + esc(o.acquired_via) + '</div>' : '') +
       (o.claims ? '<div class="spec">Note: ' + esc(o.claims) + '</div>' : '') +
       '<div class="price">' + fmtMoney(o.price) + '</div>' + pill(o.status) + ' ' + sid(o.id) +
       '<div class="thumbs">' + imgs.map(function (p) { return '<a href="' + esc(p) + '" target="_blank"><img src="' + esc(p) + '" loading="lazy" onerror="this.closest(\'a\').remove()"/></a>'; }).join('') + '</div>' +
@@ -328,10 +333,10 @@ function renderVeh() {
 async function loadVeh() { const r = await api('GET', '/api/vehicles?limit=500'); if (r.ok) { VEHS = r.data; renderVeh(); } const c = await api('GET', '/api/vehicles/count'); if (c.ok) { VEHCOUNT = c.data; renderVeh(); } }
 async function addVehicle() {
   const g = function (id) { return val(id); };
-  const body = {make: g('v_make'), model: g('v_model'), year: +g('v_year') || 0, price: +g('v_price') || 0, fuel: g('v_fuel'), transmission: g('v_trans'), km: +g('v_km') || 0, description: g('v_desc')};
+  const body = {make: g('v_make'), model: g('v_model'), year: +g('v_year') || 0, price: +g('v_price') || 0, fuel: g('v_fuel'), transmission: g('v_trans'), km: +g('v_km') || 0, description: g('v_desc'), acquired_via: document.getElementById('v_acq').value};
   if (!body.make || !body.model) { toast('Make and model are required', 'err'); return; }
   const r = await api('POST', '/api/vehicles', body);
-  if (r.ok) { toast('Vehicle added'); ['v_make', 'v_model', 'v_year', 'v_price', 'v_fuel', 'v_trans', 'v_km', 'v_desc'].forEach(function (i) { document.getElementById(i).value = ''; }); loadVeh(); }
+  if (r.ok) { toast('Vehicle added'); ['v_make', 'v_model', 'v_year', 'v_price', 'v_fuel', 'v_trans', 'v_km', 'v_desc'].forEach(function (i) { document.getElementById(i).value = ''; }); document.getElementById('v_acq').value = ''; loadVeh(); }
 }
 async function vehStatus(id, st) {
   const r = await api('PATCH', '/api/vehicles/' + id, {status: st});
@@ -411,6 +416,56 @@ async function bkStatus(id, st) {
   if (st === 'COMPLETED') body.delivery_at = new Date().toISOString();
   const r = await api('PATCH', '/api/bookings/' + id, body);
   if (r.ok) { toast('Booking ' + st); loadBK(); }
+}
+
+/* ---------- payments (manual log) / inspections (sell flow) ---------- */
+async function loadPAY() {
+  const r = await api('GET', '/api/payments'); if (!r.ok) return;
+  document.getElementById('pay').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Vehicle</th><th>Amount</th><th>Method</th><th>Status</th><th>By</th><th></th></tr>' +
+    r.data.map(function (o) {
+      const open = o.status === 'PENDING' || o.status === 'PARTIAL';
+      const act = open ? '<button class="small" onclick="payStatus(\'' + o.id + '\',\'RECEIVED\')">Received</button> ' +
+        '<button class="small" onclick="payStatus(\'' + o.id + '\',\'REFUNDED\')">Refund</button>' : '';
+      return '<tr><td>' + esc(o.phone) + '<br/>' + sid(o.id) + '</td><td>' + esc(o.vehicle) + '</td><td><b>' + fmtMoney(o.amount) + '</b>' +
+        (o.notes ? '<br/><span class="muted small">' + esc(o.notes) + '</span>' : '') + '</td><td class="muted small">' + esc(o.method) + '</td>' +
+        '<td>' + pill(o.status) + '</td><td class="muted small">' + esc(o.recorded_by) + '<br/>' + fmtDate(o.recorded_at) + '</td><td>' + act + '</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No payments recorded yet.</div>';
+}
+async function addPAY() {
+  const bk = resolveId('pay_bk'); if (!bk) return;
+  const amt = +val('pay_amt') || 0;
+  if (amt < 0) { toast('Amount must be >= 0', 'err'); return; }
+  const r = await api('POST', '/api/payments', {booking_id: bk, amount: amt, method: val('pay_method'), status: document.getElementById('pay_status').value, notes: val('pay_notes')});
+  if (r.ok) { toast('Payment recorded'); document.getElementById('pay_amt').value = ''; document.getElementById('pay_method').value = ''; document.getElementById('pay_notes').value = ''; loadPAY(); }
+}
+async function payStatus(id, st) {
+  if (st === 'REFUNDED' && !confirm('Mark this payment REFUNDED?')) return;
+  const r = await api('PATCH', '/api/payments/' + id, {status: st});
+  if (r.ok) { toast('Payment ' + st); loadPAY(); }
+}
+async function loadINSP() {
+  const r = await api('GET', '/api/inspections'); if (!r.ok) return;
+  document.getElementById('insp').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>When</th><th>Status</th><th>Notes</th><th></th></tr>' +
+    r.data.map(function (o) {
+      const act = o.status === 'SCHEDULED' ? '<button class="small" onclick="inspStatus(\'' + o.id + '\',\'COMPLETED\')">Done</button> ' +
+        '<button class="small" onclick="inspReschedule(\'' + o.id + '\')">Reschedule</button> ' +
+        '<button class="small" onclick="inspStatus(\'' + o.id + '\',\'CANCELLED\')">Cancel</button> ' +
+        '<button class="small" onclick="inspStatus(\'' + o.id + '\',\'NO_SHOW\')">No-show</button>' : '';
+      return '<tr><td>' + esc(o.phone) + '<br/>' + sid(o.id) + '</td><td>' + fmtDate(o.scheduled_at) + '</td><td>' + pill(o.status) + '</td>' +
+        '<td class="muted small">' + esc(o.notes) + '</td><td>' + act + '</td></tr>';
+    }).join('') + '</table>' : '<div class="empty">No inspections — they arrive when a seller books through WhatsApp.</div>';
+}
+async function inspStatus(id, st) {
+  const r = await api('PATCH', '/api/inspections/' + id, {status: st});
+  if (r.ok) { toast('Inspection ' + st); loadINSP(); }
+}
+async function inspReschedule(id) {
+  const v = prompt('New date and time (YYYY-MM-DD HH:MM):');
+  if (!v) return;
+  const d = new Date(v.replace(' ', 'T'));
+  if (isNaN(d)) { toast('Could not read that date', 'err'); return; }
+  const r = await api('PATCH', '/api/inspections/' + id, {scheduled_at: d.toISOString()});
+  if (r.ok) { toast('Rescheduled'); loadINSP(); }
 }
 
 /* ---------- negotiations / finance / sell / reviews / team ---------- */

@@ -598,9 +598,18 @@ func validPaymentStatus(s string) bool {
 }
 
 func (s *Server) listPayments(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Pool.Query(r.Context(), `SELECT p.id::text,p.booking_id::text,c.phone,v.make,v.model,p.amount,p.method,p.status,p.recorded_by,p.recorded_at,p.notes
-		FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN leads l ON l.id=b.lead_id JOIN customers c ON c.id=l.customer_id JOIN vehicles v ON v.id=b.vehicle_id
-		ORDER BY p.created_at DESC LIMIT 50`)
+	// Sales team handles payments: salespeople see only payments on their
+	// assigned leads; admins see everything. Manual offline log, no gateway.
+	cl := auth.Current(r)
+	q := `SELECT p.id::text,p.booking_id::text,c.phone,v.make,v.model,p.amount,p.method,p.status,p.recorded_by,p.recorded_at,p.notes
+		FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN leads l ON l.id=b.lead_id JOIN customers c ON c.id=l.customer_id JOIN vehicles v ON v.id=b.vehicle_id`
+	args := []any{}
+	if cl != nil && cl.Role == "sales" {
+		args = append(args, cl.UserID)
+		q += ` WHERE l.sales_user_id=$1`
+	}
+	q += ` ORDER BY p.created_at DESC LIMIT 50`
+	rows, err := s.Pool.Query(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, `{"error":"db"}`, 500)
 		return
@@ -654,6 +663,15 @@ func (s *Server) createPayment(w http.ResponseWriter, r *http.Request) {
 	by := ""
 	if cl := auth.Current(r); cl != nil {
 		by = cl.Email
+		// Salespeople record payments only on their assigned leads' bookings.
+		if cl.Role == "sales" {
+			var mine bool
+			_ = s.Pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM bookings b JOIN leads l ON l.id=b.lead_id WHERE b.id=$1 AND l.sales_user_id=$2)`, in.BookingID, cl.UserID).Scan(&mine)
+			if !mine {
+				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+				return
+			}
+		}
 	}
 	id := uuid.NewString()
 	if _, err := s.Pool.Exec(r.Context(), `INSERT INTO payments(id,booking_id,amount,method,status,recorded_by,notes) VALUES($1,$2,$3,$4,$5,$6,$7)`,
@@ -679,6 +697,15 @@ func (s *Server) patchPayment(w http.ResponseWriter, r *http.Request) {
 	actor := ""
 	if cl := auth.Current(r); cl != nil {
 		actor = cl.Email
+		// Salespeople update only payments on their assigned leads' bookings.
+		if cl.Role == "sales" {
+			var mine bool
+			_ = s.Pool.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM payments p JOIN bookings b ON b.id=p.booking_id JOIN leads l ON l.id=b.lead_id WHERE p.id=$1 AND l.sales_user_id=$2)`, id, cl.UserID).Scan(&mine)
+			if !mine {
+				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+				return
+			}
+		}
 	}
 	for k, v := range in {
 		if !allowed[k] {

@@ -101,12 +101,42 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <section id="s-dash"><h3>Dashboard</h3><div class="cards" id="cards"></div>
 <div class="grid2"><div class="panel"><h4>Needs attention</h4><div id="attention"></div></div>
 <div class="panel"><h4>Latest conversations</h4><div id="recentConv"></div></div></div></section>
+<section id="s-guide"><h3>Guide — where to go</h3>
+<p class="muted">Follow the steps in order. Each button jumps straight to that page.</p>
+<div class="panel"><h4>1 · Connect WhatsApp first</h4>
+<p class="muted small">Nothing flows until the phone is paired. Open WhatsApp, scan the QR, wait for “connected”.</p>
+<div class="row"><button class="primary" onclick="show('wa')">Open WhatsApp →</button></div></div>
+<div class="panel"><h4>2 · Add your vehicles</h4>
+<p class="muted small">Inventory the bot sells from. Set how each car was sourced (purchase / exchange) so reports stay accurate.</p>
+<div class="row"><button class="primary" onclick="show('veh')">Open Vehicles →</button></div></div>
+<div class="panel"><h4>3 · Work leads & chats</h4>
+<p class="muted small">New WhatsApp messages become leads automatically. Chat here, or pause the bot and reply yourself.</p>
+<div class="row"><button class="primary" onclick="show('leads')">Open Leads →</button><button onclick="show('conv')">Open Conversations →</button></div></div>
+<div class="panel"><h4>4 · Test drives & inspections</h4>
+<p class="muted small">Schedule drives for buyers; inspections are booked from sell chats — confirm, reschedule or cancel them here.</p>
+<div class="row"><button class="primary" onclick="show('td')">Open Test Drives →</button><button onclick="show('insp')">Open Inspections →</button></div></div>
+<div class="panel"><h4>5 · Bookings & payments</h4>
+<p class="muted small">Book the car, then the sales team logs each offline payment received (cash / bank / loan) against the booking. No online gateway — cash and transfers only.</p>
+<div class="row"><button class="primary" onclick="show('bk')">Open Bookings →</button><button onclick="show('pay')">Open Payments →</button></div></div>
+<div class="panel"><h4>6 · Money & valuation queues</h4>
+<p class="muted small">Haggle in Negotiations, approve Finance enquiries, accept or reject Sell and Exchange valuations.</p>
+<div class="row"><button onclick="show('neg')">Negotiations →</button><button onclick="show('fin')">Finance →</button><button onclick="show('sell')">Sell Requests →</button><button onclick="show('exc')">Exchange →</button></div></div>
+<div class="panel"><h4>7 · Finish & administer</h4>
+<p class="muted small">Record a review after delivery, manage the team, check Settings — or test the bot with no phone in the Simulator.</p>
+<div class="row"><button onclick="show('rev')">Reviews →</button><button onclick="show('team')">Team →</button><button onclick="show('set')">Settings →</button><button onclick="show('sim')">Simulator →</button></div></div></section>
 <section id="s-cust"><h3>Customers</h3>
 <div class="toolbar"><input type="search" id="q_cust" placeholder="Search name / phone…" oninput="loadCust()"/></div>
 <div id="cust"></div></section>
 <section id="s-wa"><h3>WhatsApp connection</h3><div id="waCard"></div>
 <div class="row"><button onclick="waStatus()">Refresh</button><button class="primary" onclick="waReconnect()">Reconnect</button><button class="danger" onclick="waLogout()">Logout session</button></div>
 <p class="muted small">Reconnect clears the saved session and starts a fresh QR pairing — use it when the session is stuck or expired. Logout only unlinks the phone.</p>
+<div class="panel"><h4>Setup guide — pair your phone</h4>
+<p class="muted small" style="margin:0 0 8px">Do this once. It takes about a minute.</p>
+<div>1 · Press <b>Refresh</b> above. A QR code appears below (if not, press <b>Reconnect</b> and wait a few seconds).</div>
+<div>2 · On your phone open <b>WhatsApp → Settings → Linked devices → Link a device</b>.</div>
+<div>3 · Point the phone camera at the QR code on this page.</div>
+<div>4 · Wait until the status at the top turns <b>connected</b>. New customer messages now appear under Conversations.</div>
+<p class="muted small" style="margin:8px 0 0">No QR? Press <b>Reconnect</b> for a fresh one. Stuck on “connecting”? Check the phone has internet, then Reconnect. Testing without a phone? Use the <b>Simulator</b> page instead — same engine, no pairing needed.</p></div>
 <div id="qrWrap"></div></section>
 <section id="s-leads"><h3>Leads</h3>
 <div class="toolbar"><input type="search" id="q_leads" placeholder="Search name / phone…" oninput="loadLeads()"/>
@@ -124,7 +154,8 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <select id="f_veh_status" onchange="renderVeh()"><option value="">All statuses</option><option>AVAILABLE</option><option>RESERVED</option><option>BOOKED</option><option>SOLD</option><option>DELIVERED</option><option>DRAFT</option></select>
 <button onclick="document.getElementById('vehForm').classList.toggle('hidden')">+ Add vehicle</button></div>
 <div id="vehForm" class="panel hidden"><h4>New vehicle</h4>
-<div class="row"><input id="v_make" placeholder="Make*"/><input id="v_model" placeholder="Model*"/><input id="v_year" placeholder="Year" type="number"/><input id="v_price" placeholder="Price Rs" type="number"/><input id="v_fuel" placeholder="Fuel"/><input id="v_trans" placeholder="Transmission"/><input id="v_km" placeholder="KM" type="number"/><input id="v_desc" placeholder="Description" style="min-width:240px"/><button class="primary" onclick="addVehicle()">Add</button></div></div>
+<div class="row"><input id="v_make" placeholder="Make*"/><input id="v_model" placeholder="Model*"/><input id="v_year" placeholder="Year" type="number"/><input id="v_price" placeholder="Price Rs" type="number"/><input id="v_fuel" placeholder="Fuel"/><input id="v_trans" placeholder="Transmission"/><input id="v_km" placeholder="KM" type="number"/><input id="v_desc" placeholder="Description" style="min-width:240px"/>
+<select id="v_acq" title="How was this car acquired?"><option value="">Acquired via…</option><option>purchase</option><option>exchange</option><option>consignment</option><option>other</option></select><button class="primary" onclick="addVehicle()">Add</button></div></div>
 <div class="vgrid" id="veh"></div></section>
 <section id="s-td"><h3>Test drives</h3>
 <div class="panel"><h4>Schedule</h4><div class="row">
@@ -132,6 +163,9 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <input id="td_veh" list="dl_veh" placeholder="Vehicle…" style="min-width:200px"/>
 <input id="td_when" type="datetime-local"/><button class="primary" onclick="addTD()">Schedule</button></div></div>
 <div id="td"></div></section>
+<section id="s-insp"><h3>Inspections <span class="muted small">(sell flow — booked from WhatsApp chats)</span></h3>
+<p class="muted small">Confirm, reschedule or cancel inspection appointments. New ones arrive automatically when a seller books through chat.</p>
+<div id="insp"></div></section>
 <section id="s-fu"><h3>Follow-ups</h3>
 <div class="panel"><h4>New follow-up</h4><div class="row">
 <input id="fu_lead" list="dl_leads" placeholder="Customer / phone… (lead)"/>
@@ -145,6 +179,15 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <input id="bk_veh" list="dl_veh" placeholder="Vehicle…"/>
 <input id="bk_amt" placeholder="Amount Rs" type="number"/><button class="primary" onclick="addBK()">Book</button></div></div>
 <div id="bk"></div></section>
+<section id="s-pay"><h3>Payments <span class="muted small">(sales team · manual cash/bank log — no online gateway)</span></h3>
+<div class="panel"><h4>Record payment</h4><div class="row">
+<input id="pay_bk" placeholder="Booking (customer / vehicle…)" list="dl_bk" style="min-width:220px"/>
+<input id="pay_amt" placeholder="Amount Rs" type="number" min="0"/>
+<input id="pay_method" placeholder="Method (cash / bank / loan)" style="min-width:180px"/>
+<select id="pay_status"><option>PENDING</option><option>RECEIVED</option><option>PARTIAL</option><option>REFUNDED</option></select>
+<input id="pay_notes" placeholder="Notes" style="min-width:200px"/>
+<button class="primary" onclick="addPAY()">Record</button></div></div>
+<div id="pay"></div></section>
 <section id="s-neg"><h3>Negotiations</h3>
 <div class="panel"><h4>New entry</h4><div class="row">
 <input id="ng_lead" list="dl_leads" placeholder="Customer / phone… (lead)"/>
