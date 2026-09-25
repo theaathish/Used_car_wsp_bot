@@ -158,11 +158,11 @@ async function waStatus() {
   const r = await api('GET', '/api/whatsapp/status'); if (!r.ok) return;
   const j = r.data;
   const st = j.status;
-  const pillCls = st === 'connected' ? 'p-green' : (st === 'qr' ? 'p-amber' : (st === 'expired' ? 'p-red' : 'p-gray'));
+  const pillCls = st === 'connected' ? 'p-green' : (st === 'qr' ? 'p-amber' : (st === 'logged_out' ? 'p-red' : 'p-gray'));
   let extra = '';
   if (j.last_error) extra += '<div class="muted small" style="margin-top:6px">Last error (' + (j.fail_count || 0) + ' tries): ' + esc(j.last_error) + '</div>';
-  if (st === 'expired') extra += '<div style="margin-top:8px"><b>Session looks dead.</b> Press <b>Reconnect</b> below, then scan the fresh QR. The worker keeps retrying in the background meanwhile.</div>';
-  else if (st === 'connecting' && (j.fail_count || 0) > 3) extra += '<div class="muted small" style="margin-top:6px">Retrying… if this persists, press <b>Reconnect</b> for a fresh pairing.</div>';
+  if (st === 'logged_out') extra += '<div style="margin-top:8px"><b>Logged out by WhatsApp/phone.</b> The session is gone server-side — press <b>Reconnect</b> below, then scan the fresh QR. This is the only case that needs you; anything else recovers alone.</div>';
+  else if (st === 'connecting' && (j.fail_count || 0) > 3) extra += '<div class="muted small" style="margin-top:6px">Retrying in the background — it recovers on its own. (Press <b>Reconnect</b> only to start a completely fresh pairing.)</div>';
   document.getElementById('waCard').innerHTML = '<div class="panel">Status: ' +
     '<span class="pill ' + pillCls + '">' + esc(st) + '</span>' +
     (j.jid ? ' <span class="muted small">' + esc(j.jid) + '</span>' : '') + extra + '</div>';
@@ -170,7 +170,7 @@ async function waStatus() {
   if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
   if (j.has_qr) { w.innerHTML = '<p>Scan with WhatsApp → Linked devices:</p><img class="qr" id="qrImg" />'; loadQR();
     qrTimer = setTimeout(function () { if (document.getElementById('s-wa').classList.contains('active')) waStatus(); }, 20000);
-  } else if (st === 'expired') { w.innerHTML = '<p class="muted">No QR yet — press <b>Reconnect</b> above to generate one, then scan it.</p>'; }
+  } else if (st === 'logged_out') { w.innerHTML = '<p class="muted">Session ended — press <b>Reconnect</b> above to generate a fresh QR, then scan it.</p>'; }
   else w.innerHTML = st === 'connected' ? '<p class="muted">Paired and receiving. New messages appear under Conversations.</p>' : '';
 }
 async function loadQR() {

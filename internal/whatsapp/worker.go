@@ -53,10 +53,21 @@ type Worker struct {
 
 	container *sqlstore.Container
 	repairCh  chan struct{} // wakes the supervisor to re-pair immediately
+	wakeCh    chan struct{} // wakes the monitor to reconnect immediately on remote disconnect
+	banUntil  time.Time     // TemporaryBan expiry; connect loop waits it out instead of hammering
 
-	// Failure accounting: after sustained connect failures the session is
-	// almost certainly dead server-side. Surface it instead of retrying
-	// silently forever.
+	// instanceID identifies this process in leader election. The WhatsApp
+	// device session lives in shared Postgres storage, so two processes
+	// (redeploy overlap, >1 replica, local dev against prod DB) calling
+	// Connect on the same device kick each other off in a tight connect/drop
+	// loop. Only the elected leader may own the socket; losers stay standby.
+	instanceID string
+	isLeader   bool
+
+	// Failure accounting: connect failures never park the worker — it retries
+	// forever with capped backoff and keeps the last error visible. Only a
+	// server-declared LoggedOut (session killed by WhatsApp/phone) flips to
+	// "logged_out", the single state that needs a human rescan.
 	nFails  int
 	lastErr string
 
@@ -74,13 +85,11 @@ func (w *Worker) failCount() int {
 	defer w.mu.RUnlock()
 	return w.nFails
 }
-// the status becomes "expired" so the admin knows to press Reconnect.
-// Returns the backoff to wait.
-// noteFailure records a connect failure. After maxFails consecutive failures
-// the status becomes "expired" so the admin knows to press Reconnect.
-// Returns the backoff to wait.
+// noteFailure records a connect failure and returns the backoff to wait.
+// The status never escalates: transient failures (network, restarts, flaky
+// egress) retry forever as "connecting" with the last error visible. Only a
+// server-declared LoggedOut means the session is truly dead.
 func (w *Worker) noteFailure(err error) time.Duration {
-	const maxFails = 15
 	msg := err.Error()
 	if len(msg) > 200 {
 		msg = msg[:200]
@@ -89,11 +98,7 @@ func (w *Worker) noteFailure(err error) time.Duration {
 	w.nFails++
 	n := w.nFails
 	w.lastErr = msg
-	st := "connecting"
-	if n >= maxFails {
-		st = "expired"
-	}
-	w.setStatusLocked(st, "")
+	w.setStatusLocked("connecting", "")
 	jid := w.lastJID
 	w.mu.Unlock()
 	_, _ = w.pool.Exec(context.Background(),
@@ -120,10 +125,11 @@ func (w *Worker) noteSuccess(jid string) {
 		true, j)
 }
 
-// noteFlap records a connect-then-drop cycle. 6+ cycles in 10 min flips to
-// "expired" so the admin gets the Reconnect prompt instead of a day of
-// "connecting". Returns true when expired.
-func (w *Worker) noteFlap(reason string) bool {
+// noteFlap records a connect-then-drop cycle in a rolling 10-minute window
+// (surfaced as cycles_10m for diagnosis). Like noteFailure it never
+// escalates: churn alone can't prove the session dead, so the worker keeps
+// reconnecting as "connecting".
+func (w *Worker) noteFlap(reason string) {
 	if len(reason) > 200 {
 		reason = reason[:200]
 	}
@@ -139,12 +145,7 @@ func (w *Worker) noteFlap(reason string) bool {
 	w.cycles = keep
 	w.lastCycle = reason
 	w.lastErr = reason
-	expired := len(keep) >= 6
-	st := "connecting"
-	if expired {
-		st = "expired"
-	}
-	w.setStatusLocked(st, "")
+	w.setStatusLocked("connecting", "")
 	jid := w.lastJID
 	n := len(keep)
 	w.mu.Unlock()
@@ -152,12 +153,110 @@ func (w *Worker) noteFlap(reason string) bool {
 		`INSERT INTO whatsapp_sessions(id,connected,jid) VALUES('default',$1,$2)
 		 ON CONFLICT (id) DO UPDATE SET connected=$1, jid=$2, updated_at=now()`,
 		false, jid)
-	log.Printf("[whatsapp] cycle #%d in 10min (%s) -> %s", n, reason, st)
-	return expired
+	log.Printf("[whatsapp] cycle #%d in 10min (%s)", n, reason)
+}
+
+// banActive returns the TemporaryBan expiry when one is still in force.
+func (w *Worker) banActive() time.Time {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if time.Now().Before(w.banUntil) {
+		return w.banUntil
+	}
+	return time.Time{}
 }
 
 func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string) *Worker {
-	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1)}
+	id := uuid.NewString()
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1), wakeCh: make(chan struct{}, 1), instanceID: id}
+}
+
+// leaderTTL is how long a leader claim stays valid without a heartbeat.
+// Standby workers re-check every standbyPoll and take over only after the
+// leader goes quiet for a full TTL (redeploy overlap resolves itself).
+const leaderTTL = 90 * time.Second
+
+// standbyPoll is how long a non-leader waits between election checks.
+const standbyPoll = 10 * time.Second
+
+// claimLeadership tries to become (or remain) the single socket owner.
+// Fail-open: without a pool, or when the election table/DB is unavailable,
+// it returns true so a standalone process behaves exactly as before.
+func (w *Worker) claimLeadership(ctx context.Context) bool {
+	if w.pool == nil {
+		w.mu.Lock()
+		w.isLeader = true
+		w.mu.Unlock()
+		return true
+	}
+	const ttlSecs = 90
+	var owner string
+	err := w.pool.QueryRow(ctx, `
+		INSERT INTO whatsapp_leader(id, owner, updated_at) VALUES('leader',$1,now())
+		ON CONFLICT (id) DO UPDATE SET owner=EXCLUDED.owner, updated_at=now()
+		WHERE whatsapp_leader.owner=EXCLUDED.owner
+		   OR whatsapp_leader.owner=''
+		   OR whatsapp_leader.updated_at < now() - make_interval(secs => $2)
+		RETURNING owner`, w.instanceID, ttlSecs).Scan(&owner)
+	if err == nil {
+		mine := owner == w.instanceID
+		w.mu.Lock()
+		w.isLeader = mine
+		w.mu.Unlock()
+		return mine
+	}
+	if isNoRow(err) {
+		// Someone else holds a fresh lease — stay standby, never Connect.
+		w.mu.Lock()
+		w.isLeader = false
+		w.mu.Unlock()
+		return false
+	}
+	log.Printf("[whatsapp] leader election unavailable, proceeding as owner: %v", err)
+	w.mu.Lock()
+	w.isLeader = true
+	w.mu.Unlock()
+	return true
+}
+
+// cycleCount returns the number of connect/drop cycles in the rolling
+// 10-minute window (prunes expired entries first).
+func (w *Worker) cycleCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := time.Now()
+	keep := w.cycles[:0]
+	for _, t := range w.cycles {
+		if now.Sub(t) < 10*time.Minute {
+			keep = append(keep, t)
+		}
+	}
+	w.cycles = keep
+	return len(keep)
+}
+
+// flapBackoff maps recent churn to a reconnect delay so a sustained storm
+// (duplicate worker, dead phone, bad egress) backs off instead of hammering
+// WhatsApp every 3s — hammering risks a TemporaryBan and keeps the socket
+// fight hot. Pure for tests.
+func flapBackoff(cycles int) time.Duration {
+	switch {
+	case cycles >= 11:
+		return 5 * time.Minute
+	case cycles >= 6:
+		return time.Minute
+	case cycles >= 3:
+		return 15 * time.Second
+	default:
+		return 3 * time.Second
+	}
+}
+
+func isNoRow(err error) bool {
+	return err != nil && (err == pgx.ErrNoRows || strings.Contains(err.Error(), "no rows"))
 }
 
 func (w *Worker) phoneLock(phone string) *sync.Mutex {
@@ -200,7 +299,8 @@ func (w *Worker) Status() map[string]any {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return map[string]any{"status": w.status, "jid": w.lastJID, "enabled": w.enabled, "has_qr": w.lastQR != "",
-		"fail_count": w.nFails, "last_error": w.lastErr, "last_cycle": w.lastCycle, "cycles_10m": len(w.cycles)}
+		"fail_count": w.nFails, "last_error": w.lastErr, "last_cycle": w.lastCycle, "cycles_10m": len(w.cycles),
+		"instance": w.instanceID, "leader": w.isLeader}
 }
 
 func (w *Worker) QRPNG() ([]byte, error) {
@@ -268,14 +368,47 @@ func (w *Worker) Start(ctx context.Context) {
 			return
 		default:
 		}
+		// Single-owner gate: only the elected leader may Connect. Losers
+		// stay standby so two processes never fight over the same device
+		// (the tight 30s connect/drop storm in Sep-2026 logs).
+		if !w.claimLeadership(ctx) {
+			w.mu.Lock()
+			w.lastErr = "standby: another worker holds the whatsapp leader lease"
+			w.setStatusLocked("connecting", "")
+			w.mu.Unlock()
+			if !sleepInterrupt(ctx, w.repairCh, standbyPoll) {
+				return
+			}
+			continue
+		}
 		if !w.runOnce(ctx) {
 			return
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(3 * time.Second):
+		// Flap-aware pause: sustained churn backs off (up to 5min) instead
+		// of hammering WhatsApp every 3s. Admin Reconnect cuts through
+		// immediately via repairCh.
+		wait := flapBackoff(w.cycleCount())
+		if wait > 3*time.Second {
+			log.Printf("[whatsapp] backing off %s after %d cycles in 10min", wait, w.cycleCount())
 		}
+		if !sleepInterrupt(ctx, w.repairCh, wait) {
+			return
+		}
+	}
+}
+
+// sleepInterrupt waits for d, returning false when the context is done.
+// A repair signal (admin Reconnect) cuts the wait short and returns true.
+func sleepInterrupt(ctx context.Context, repairCh chan struct{}, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-repairCh:
+		return true
+	case <-t.C:
+		return true
 	}
 }
 
@@ -288,6 +421,13 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 		return true
 	}
 	cli := whatsmeow.NewClient(device, waLog.Noop)
+	// Single owner for reconnecting: the supervisor loop below retries
+	// forever with capped backoff and never parks on a counter — no failure
+	// count or flap count can flip the worker into a state that demands a
+	// manual rescan. The library's internal auto-reconnect must stay off —
+	// otherwise it races this loop: the 30s monitor sees the socket down
+	// mid-retry, Disconnect()s (cancelling the library retry), and churns.
+	cli.EnableAutoReconnect = false
 	cli.AddEventHandler(w.onEvent)
 	w.mu.Lock()
 	if w.client != nil {
@@ -304,11 +444,22 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 			return true // aborted by repair signal; outer loop re-cycles
 		}
 	} else {
-		// Connect with timeout + backoff; a hanging dial can't stick at
-		// "connecting" for a day, and sustained failure marks the session
-		// expired instead of retrying silently forever.
+		// Connect with timeout + backoff; a hanging dial can't stick without
+		// progress — every failure is counted, surfaced, and retried.
 		for {
 			w.setStatus("connecting", "")
+			if until := w.banActive(); !until.IsZero() {
+				wait := time.Until(until)
+				log.Printf("[whatsapp] temp-banned, waiting %s before retry", wait.Round(time.Second))
+				select {
+				case <-ctx.Done():
+					return false
+				case <-w.repairCh:
+					return true
+				case <-time.After(wait):
+				}
+				continue
+			}
 			cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			err := cli.ConnectContext(cctx)
 			cancel()
@@ -343,11 +494,27 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 		case <-w.repairCh:
 			cli.Disconnect()
 			return true
+		case <-w.wakeCh:
+			// Remote side dropped the socket (Disconnected event). Recycle
+			// immediately instead of waiting for the 30s poll. No flap
+			// accounting here — a single drop is normal; the ticker still
+			// catches genuine connect/drop churn.
+			if !cli.IsConnected() {
+				cli.Disconnect()
+				return true
+			}
 		case <-t.C:
 			if !cli.IsConnected() {
 				uptime := time.Since(connectedAt).Round(time.Second)
 				reason := "socket dropped after " + uptime.String() + " (duplicate worker sharing one device, phone offline, or network flap)"
 				w.noteFlap(reason)
+				cli.Disconnect()
+				return true
+			}
+			// Heartbeat while healthy so standby peers keep seeing a fresh
+			// lease and never try to Connect alongside us.
+			if !w.claimLeadership(ctx) {
+				log.Printf("[whatsapp] lost leader lease while connected, recycling to re-arbitrate")
 				cli.Disconnect()
 				return true
 			}
@@ -415,6 +582,7 @@ func (w *Worker) Reconnect(ctx context.Context) error {
 	w.lastErr = ""
 	w.cycles = nil
 	w.lastCycle = ""
+	w.banUntil = time.Time{}
 	w.mu.Unlock()
 	select {
 	case w.repairCh <- struct{}{}:
@@ -439,10 +607,21 @@ func (w *Worker) onEvent(evt any) {
 		return
 	case *events.TemporaryBan:
 		log.Printf("[whatsapp] temp ban code=%v expire=%v", e.Code, e.Expire)
+		// Retrying through a temp ban extends it. Park until it lifts;
+		// the connect loop waits banUntil out instead of hammering.
+		if e.Expire > 0 {
+			w.mu.Lock()
+			w.banUntil = time.Now().Add(e.Expire)
+			w.mu.Unlock()
+		}
 		return
 	case *events.Disconnected:
 		log.Printf("[whatsapp] disconnected event, reconnect loop continues")
 		w.setStatus("connecting", w.lastJID)
+		select {
+		case w.wakeCh <- struct{}{}:
+		default:
+		}
 		return
 	}
 	m, ok := evt.(*events.Message)
