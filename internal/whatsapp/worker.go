@@ -82,6 +82,10 @@ type Worker struct {
 	// ignores a logout older than its own connectedAt, so a logout that
 	// raced a fresh pairing can't wipe the new session.
 	logoutAt time.Time
+	// parked means repeated server-side kills tripped the auto-repair
+	// guard: the supervisor idles in logged_out until an admin Reconnect.
+	// Only a human clears it.
+	parked bool
 
 	// Failure accounting: connect failures never park the worker — it retries
 	// forever with capped backoff and keeps the last error visible. Only a
@@ -278,6 +282,24 @@ func isNoRow(err error) bool {
 	return err != nil && (err == pgx.ErrNoRows || strings.Contains(err.Error(), "no rows"))
 }
 
+// probeLiveness proves the socket is really alive with a cheap server
+// round-trip (own user info). IsConnected alone can't catch half-open TCP
+// that silently drops traffic — on probe failure the worker recycles, and
+// the flap backoff keeps a blinking network from spinning hot.
+func (w *Worker) probeLiveness(ctx context.Context, cli *whatsmeow.Client) bool {
+	if cli.Store.ID == nil {
+		return false
+	}
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := cli.GetUserInfo(pctx, []types.JID{*cli.Store.ID})
+	if err != nil {
+		log.Printf("[whatsapp] liveness probe failed: %v", err)
+		return false
+	}
+	return true
+}
+
 func (w *Worker) phoneLock(phone string) *sync.Mutex {
 	w.locksMu.Lock()
 	defer w.locksMu.Unlock()
@@ -395,6 +417,18 @@ func (w *Worker) Start(ctx context.Context) {
 			return
 		default:
 		}
+		// Parked after repeated server-side kills (likely ban): idle in
+		// logged_out until an admin Reconnect. Nothing auto-heals a ban.
+		w.mu.RLock()
+		parked := w.parked
+		w.mu.RUnlock()
+		if parked {
+			w.setStatus("logged_out", "")
+			if !sleepInterrupt(ctx, w.repairCh, 5*time.Minute) {
+				return
+			}
+			continue
+		}
 		// Single-owner gate: only the elected leader may Connect. Losers
 		// stay standby so two processes never fight over the same device
 		// (the tight 30s connect/drop storm in Sep-2026 logs).
@@ -511,7 +545,9 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 	}
 	w.noteSuccess(jid)
 	connectedAt := time.Now()
-	t := time.NewTicker(30 * time.Second)
+	// 10s tick (not 30s): transport drops are caught fast, and the tick
+	// doubles as the leadership heartbeat + liveness probe below.
+	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -551,6 +587,30 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 				uptime := time.Since(connectedAt).Round(time.Second)
 				reason := "socket dropped after " + uptime.String() + " (duplicate worker sharing one device, phone offline, or network flap)"
 				w.noteFlap(reason)
+				cli.Disconnect()
+				return true
+			}
+			if !cli.IsLoggedIn() {
+				// Auth flag gone while the socket looks alive (missed
+				// LoggedOut event): same recovery as a server logout,
+				// same loop guard.
+				w.mu.Lock()
+				w.logoutAt = time.Now()
+				w.mu.Unlock()
+				cli.Disconnect()
+				if !w.recordAutoRepair() {
+					w.mu.Lock()
+					w.parked = true
+					w.mu.Unlock()
+					log.Println("[whatsapp] login repeatedly lost — parking for admin re-auth")
+					return true
+				}
+				w.wipeDevices(ctx)
+				log.Println("[whatsapp] login lost while connected — fresh QR pairing starting")
+				return true
+			}
+			if !w.probeLiveness(ctx, cli) {
+				w.noteFlap("liveness probe failed (half-open socket, phone offline, or network flap)")
 				cli.Disconnect()
 				return true
 			}
@@ -724,6 +784,7 @@ func (w *Worker) wipeDevices(ctx context.Context) {
 	w.pairPhone = ""
 	w.pairCode = ""
 	w.pairCodeExp = time.Time{}
+	w.parked = false
 	w.nFails = 0
 	w.lastErr = ""
 	w.cycles = nil
@@ -773,6 +834,9 @@ func (w *Worker) onEvent(evt any) {
 			}
 		} else {
 			log.Printf("[whatsapp] logged out (reason %v) repeatedly — admin re-auth required", e.Reason)
+			w.mu.Lock()
+			w.parked = true
+			w.mu.Unlock()
 			w.setStatus("logged_out", "")
 		}
 		return
