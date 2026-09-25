@@ -288,8 +288,32 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"no qr"}`, http.StatusNotFound)
 			return
 		}
+		// QR codes rotate and expire: never let browsers/proxies serve a
+		// stale image for a fresh pairing window.
 		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
 		_, _ = w.Write(png)
+	case p == "/api/whatsapp/pair-code" && r.Method == "POST":
+		// Phone-number linking: 8-char code typed into the phone
+		// (Linked devices > Link with phone number) instead of scanning.
+		var in struct {
+			Phone string `json:"phone"`
+		}
+		if err := readJSON(r, &in); err != nil || in.Phone == "" {
+			http.Error(w, `{"error":"phone required, international digits e.g. 60123456789"}`, http.StatusBadRequest)
+			return
+		}
+		code, exp, err := s.WA.RequestPairCode(in.Phone)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusConflict)
+			return
+		}
+		if code == "" {
+			writeJSON(w, map[string]any{"ok": true, "queued": true})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "code": code, "expires_at": exp})
 	case p == "/api/whatsapp/send" && r.Method == "POST":
 		var in struct {
 			Phone   string `json:"phone"`

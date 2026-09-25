@@ -168,18 +168,37 @@ async function waStatus() {
     (j.jid ? ' <span class="muted small">' + esc(j.jid) + '</span>' : '') + extra + '</div>';
   const w = document.getElementById('qrWrap');
   if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
-  if (j.has_qr) { w.innerHTML = '<p>Scan with WhatsApp → Linked devices:</p><img class="qr" id="qrImg" />'; loadQR();
+  if (j.has_qr) { w.innerHTML = '<p>Scan with WhatsApp → Linked devices:</p><img class="qr" id="qrImg" />' +
+    '<div class="muted small" style="margin-top:8px">No camera? Link with phone number instead:</div>' +
+    '<div style="display:flex;gap:6px;margin-top:4px"><input id="pairPhone" placeholder="60123456789" style="flex:1" />' +
+    '<button onclick="waPairCode()">Get code</button></div>' +
+    '<div id="pairOut" style="margin-top:6px">' + (j.pair_code ? ('<b style="font-size:20px;letter-spacing:3px">' + esc(j.pair_code) + '</b><div class="muted small">Type into phone → Linked devices → Link with phone number. Expires ' + esc(j.pair_code_expires_at || '') + '</div>') : '') + '</div>';
+    loadQR();
     qrTimer = setTimeout(function () { if (document.getElementById('s-wa').classList.contains('active')) waStatus(); }, 20000);
   } else if (st === 'logged_out') { w.innerHTML = '<p class="muted">Session ended — press <b>Reconnect</b> above to generate a fresh QR, then scan it.</p>'; }
   else w.innerHTML = st === 'connected' ? '<p class="muted">Paired and receiving. New messages appear under Conversations.</p>' : '';
 }
 async function loadQR() {
   try {
-    const r = await fetch('/api/whatsapp/qr', {headers: H()});
+    const r = await fetch('/api/whatsapp/qr?t=' + Date.now(), {headers: H()});
     if (!r.ok) return;
     const b = await r.blob(); const img = document.getElementById('qrImg');
     if (img) img.src = URL.createObjectURL(b);
   } catch (e) {}
+}
+async function waPairCode() {
+  const inp = document.getElementById('pairPhone');
+  const phone = inp && inp.value.trim();
+  if (!phone) { toast('Enter the phone number in international format', 'err'); return; }
+  const r = await api('POST', '/api/whatsapp/pair-code', {phone: phone});
+  const out = document.getElementById('pairOut');
+  if (!r.ok || !out) return;
+  if (r.data && r.data.code) {
+    out.innerHTML = '<b style="font-size:20px;letter-spacing:3px">' + esc(r.data.code) + '</b><div class="muted small">Type into phone → Linked devices → Link with phone number. Expires ' + esc(r.data.expires_at || '') + '</div>';
+  } else {
+    out.innerHTML = '<div class="muted small">Code requested — it appears here in a few seconds…</div>';
+    setTimeout(waStatus, 5000);
+  }
 }
 async function waLogout() { if (!confirm('Unlink WhatsApp? You will need to scan again.')) return; await api('POST', '/api/whatsapp/logout'); waStatus(); }
 async function waReconnect() {

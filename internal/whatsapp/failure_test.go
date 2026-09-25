@@ -97,3 +97,40 @@ func TestClaimLeadershipNoPool(t *testing.T) {
 		t.Fatalf("want leader+instance in status, got %v", st)
 	}
 }
+
+// Pair-code requests validate before touching anything: bad numbers fail,
+// connected workers refuse, idle workers ask for a pairing window first.
+func TestRequestPairCodeValidation(t *testing.T) {
+	w := New(nil, t.TempDir(), true, "")
+	for _, bad := range []string{"", "abc", "0123", "12345", "12345678901234567"} {
+		if _, _, err := w.RequestPairCode(bad); err == nil {
+			t.Fatalf("want error for %q", bad)
+		}
+	}
+	w.status = "connected"
+	if _, _, err := w.RequestPairCode("60123456789"); err == nil {
+		t.Fatal("want already-paired error when connected")
+	}
+	w.status = "connecting"
+	if _, _, err := w.RequestPairCode("60123456789"); err == nil {
+		t.Fatal("want no-window error when not pairing")
+	}
+}
+
+// Logout auto-repair allows a few recoveries then parks for a human;
+// old entries age out of the window.
+func TestRecordAutoRepair(t *testing.T) {
+	w := New(nil, t.TempDir(), true, "")
+	for i := 0; i < 3; i++ {
+		if !w.recordAutoRepair() {
+			t.Fatalf("repair %d should proceed", i+1)
+		}
+	}
+	if w.recordAutoRepair() {
+		t.Fatal("4th logout in 30min must park for a human")
+	}
+	w.autoRepairs = []time.Time{time.Now().Add(-time.Hour)}
+	if !w.recordAutoRepair() {
+		t.Fatal("aged-out entries must allow repair again")
+	}
+}

@@ -54,6 +54,7 @@ type Worker struct {
 	container *sqlstore.Container
 	repairCh  chan struct{} // wakes the supervisor to re-pair immediately
 	wakeCh    chan struct{} // wakes the monitor to reconnect immediately on remote disconnect
+	logoutCh  chan struct{} // server-side logout: wipe device + start fresh pairing
 	banUntil  time.Time     // TemporaryBan expiry; connect loop waits it out instead of hammering
 
 	// instanceID identifies this process in leader election. The WhatsApp
@@ -63,6 +64,24 @@ type Worker struct {
 	// loop. Only the elected leader may own the socket; losers stay standby.
 	instanceID string
 	isLeader   bool
+
+	// Pairing state: QR code rotation + optional phone-number pairing code
+	// (8 chars typed into the phone instead of scanning). pairPhone is a
+	// pending request consumed by pair() on the next QR code event;
+	// pairCode/pairCodeExp is the live code shown in admin.
+	qrAt        time.Time
+	pairPhone   string
+	pairCode    string
+	pairCodeExp time.Time
+
+	// autoRepairs timestamps guard the auto re-pair on server-side logout:
+	// more than maxAutoRepairs in autoRepairWindow means WhatsApp keeps
+	// killing the session (ban/ToS) — park in logged_out for a human.
+	autoRepairs []time.Time
+	// logoutAt marks the last server-side logout signal. The monitor
+	// ignores a logout older than its own connectedAt, so a logout that
+	// raced a fresh pairing can't wipe the new session.
+	logoutAt time.Time
 
 	// Failure accounting: connect failures never park the worker — it retries
 	// forever with capped backoff and keeps the last error visible. Only a
@@ -171,7 +190,7 @@ func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string) *Worker
 	if len(id) > 8 {
 		id = id[:8]
 	}
-	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1), wakeCh: make(chan struct{}, 1), instanceID: id}
+	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1), wakeCh: make(chan struct{}, 1), logoutCh: make(chan struct{}, 1), instanceID: id}
 }
 
 // leaderTTL is how long a leader claim stays valid without a heartbeat.
@@ -298,9 +317,17 @@ var validStates = map[string]bool{
 func (w *Worker) Status() map[string]any {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
+	var qrAt, codeExp string
+	if !w.qrAt.IsZero() {
+		qrAt = w.qrAt.Format(time.RFC3339)
+	}
+	if !w.pairCodeExp.IsZero() {
+		codeExp = w.pairCodeExp.Format(time.RFC3339)
+	}
 	return map[string]any{"status": w.status, "jid": w.lastJID, "enabled": w.enabled, "has_qr": w.lastQR != "",
 		"fail_count": w.nFails, "last_error": w.lastErr, "last_cycle": w.lastCycle, "cycles_10m": len(w.cycles),
-		"instance": w.instanceID, "leader": w.isLeader}
+		"instance": w.instanceID, "leader": w.isLeader,
+		"qr_at": qrAt, "pair_code": w.pairCode, "pair_code_expires_at": codeExp}
 }
 
 func (w *Worker) QRPNG() ([]byte, error) {
@@ -494,6 +521,22 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 		case <-w.repairCh:
 			cli.Disconnect()
 			return true
+		case <-w.logoutCh:
+			// Server-side logout: wipe the dead device and recycle into a
+			// fresh pairing window. Counters reset in wipeDevices, so the
+			// supervisor backoff stays short and a QR appears promptly.
+			// A logout older than this monitor's own session raced a fresh
+			// pairing — ignore it so the new session survives.
+			w.mu.RLock()
+			logoutAt := w.logoutAt
+			w.mu.RUnlock()
+			if connectedAt.After(logoutAt) {
+				continue
+			}
+			cli.Disconnect()
+			w.wipeDevices(ctx)
+			log.Println("[whatsapp] session ended by WhatsApp/phone — fresh QR pairing starting")
+			return true
 		case <-w.wakeCh:
 			// Remote side dropped the socket (Disconnected event). Recycle
 			// immediately instead of waiting for the 30s poll. No flap
@@ -524,6 +567,10 @@ func (w *Worker) runOnce(ctx context.Context) bool {
 
 // pair runs QR pairing. Returns (paired, alive): alive=false only when the
 // context is done; paired=false means aborted by repair signal.
+// A server-side timeout (160s window, nobody scanned) recycles into a fresh
+// window instead of parking on a stale QR. A pending phone-number request
+// (RequestPairCode) is converted into an 8-char linking code on the next
+// QR event, so the admin can link without a camera.
 func (w *Worker) pair(ctx context.Context, cli *whatsmeow.Client) (bool, bool) {
 	w.setStatus("qr", "")
 	qrCh, _ := cli.GetQRChannel(ctx)
@@ -543,21 +590,102 @@ func (w *Worker) pair(ctx context.Context, cli *whatsmeow.Client) (bool, bool) {
 			if !ok {
 				return false, true
 			}
-			if evt.Event == "code" {
+			switch evt.Event {
+			case "code":
 				w.mu.Lock()
 				w.lastQR = evt.Code
+				w.qrAt = time.Now()
+				phone := w.pairPhone
+				w.pairPhone = ""
 				w.mu.Unlock()
 				log.Println("[whatsapp] QR ready — open admin to scan")
-			} else if evt.Event == "success" {
+				if phone != "" {
+					w.generatePairCode(ctx, cli, phone)
+				}
+			case "success":
 				w.mu.Lock()
 				w.lastQR = ""
+				w.qrAt = time.Time{}
+				w.pairPhone = ""
+				w.pairCode = ""
+				w.pairCodeExp = time.Time{}
 				w.mu.Unlock()
 				w.setStatus("connected", "")
 				log.Println("[whatsapp] paired OK")
 				return true, true
+			case "timeout", "err-unexpected-state", "err-client-outdated", "err-scanned-without-multidevice":
+				// Nobody scanned inside the pairing window (or the client
+				// is outdated): rotate into a fresh window right away so
+				// the admin never scans a dead QR.
+				log.Printf("[whatsapp] pairing window ended (%s), rotating fresh QR", evt.Event)
+				cli.Disconnect()
+				return false, true
+			case "error":
+				if evt.Error != nil {
+					log.Printf("[whatsapp] pairing error: %v", evt.Error)
+				}
 			}
 		}
 	}
+}
+
+// generatePairCode asks WhatsApp for an 8-char linking code for phone,
+// valid for the rest of the pairing window (~160s). The user types it into
+// the phone under Linked devices > Link with phone number. Failures keep
+// the QR path alive — codes are a convenience, not a requirement.
+func (w *Worker) generatePairCode(ctx context.Context, cli *whatsmeow.Client, phone string) {
+	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	code, err := cli.PairPhone(pctx, phone, true, whatsmeow.PairClientChrome, "Chrome (Windows)")
+	if err != nil {
+		log.Printf("[whatsapp] pair code for %s failed (QR still works): %v", phone, err)
+		return
+	}
+	w.mu.Lock()
+	w.pairCode = code
+	w.pairCodeExp = time.Now().Add(150 * time.Second)
+	w.mu.Unlock()
+	log.Printf("[whatsapp] pair code for %s ready, expires in ~150s", phone)
+}
+
+// RequestPairCode queues a phone-number linking code for the current (or
+// next) QR pairing window. Returns a live code when one already exists,
+// otherwise queues the request (empty code) for generation on the next QR
+// event. Only meaningful while pairing.
+func (w *Worker) RequestPairCode(phone string) (code, expiresAt string, err error) {
+	d := normalizePhone(phone)
+	if len(d) < 7 || len(d) > 15 || strings.HasPrefix(d, "0") {
+		return "", "", fmt.Errorf("phone must be international format digits, e.g. 60123456789")
+	}
+	w.mu.RLock()
+	st := w.status
+	cli := w.client
+	w.mu.RUnlock()
+	if st == "connected" {
+		return "", "", fmt.Errorf("already paired — no code needed")
+	}
+	if st != "qr" || cli == nil {
+		return "", "", fmt.Errorf("no active pairing window — press Reconnect first, then request the code")
+	}
+	w.mu.Lock()
+	// Fresh code already live: hand it out again instead of burning the
+	// single pairing window on a second request.
+	if w.pairCode != "" && time.Now().Before(w.pairCodeExp) {
+		code, exp := w.pairCode, w.pairCodeExp.Format(time.RFC3339)
+		w.mu.Unlock()
+		return code, exp, nil
+	}
+	w.pairPhone = d
+	w.pairCode = ""
+	w.pairCodeExp = time.Time{}
+	w.mu.Unlock()
+	// Nudge the supervisor; if pair() already runs it picks the request up
+	// on the next QR rotation, otherwise a fresh window starts.
+	select {
+	case w.repairCh <- struct{}{}:
+	default:
+	}
+	return "", "", nil
 }
 
 // Reconnect clears every stored device (wipes dead sessions) and forces an
@@ -569,21 +697,7 @@ func (w *Worker) Reconnect(ctx context.Context) error {
 	if cli != nil {
 		cli.Disconnect()
 	}
-	if w.container != nil {
-		if devs, err := w.container.GetAllDevices(ctx); err == nil {
-			for _, d := range devs {
-				_ = w.container.DeleteDevice(ctx, d)
-			}
-		}
-	}
-	w.mu.Lock()
-	w.lastQR = ""
-	w.nFails = 0
-	w.lastErr = ""
-	w.cycles = nil
-	w.lastCycle = ""
-	w.banUntil = time.Time{}
-	w.mu.Unlock()
+	w.wipeDevices(ctx)
 	select {
 	case w.repairCh <- struct{}{}:
 	default:
@@ -593,11 +707,74 @@ func (w *Worker) Reconnect(ctx context.Context) error {
 	return nil
 }
 
+// wipeDevices deletes every stored device and resets pairing/counter state
+// so the next supervisor cycle starts a completely fresh pairing window.
+// Shared by admin Reconnect and automatic logout recovery.
+func (w *Worker) wipeDevices(ctx context.Context) {
+	if w.container != nil {
+		if devs, err := w.container.GetAllDevices(ctx); err == nil {
+			for _, d := range devs {
+				_ = w.container.DeleteDevice(ctx, d)
+			}
+		}
+	}
+	w.mu.Lock()
+	w.lastQR = ""
+	w.qrAt = time.Time{}
+	w.pairPhone = ""
+	w.pairCode = ""
+	w.pairCodeExp = time.Time{}
+	w.nFails = 0
+	w.lastErr = ""
+	w.cycles = nil
+	w.lastCycle = ""
+	w.banUntil = time.Time{}
+	w.mu.Unlock()
+}
+
+// Auto re-pair guard: a single server-side logout recovers alone with a
+// fresh QR, but repeated logouts inside autoRepairWindow mean WhatsApp keeps
+// killing the session (ban/ToS/abuse) — then park for a human instead of
+// spinning fresh QRs nobody can use.
+const maxAutoRepairs = 3
+const autoRepairWindow = 30 * time.Minute
+
+// recordAutoRepair counts this logout and reports whether an automatic
+// fresh pairing may proceed.
+func (w *Worker) recordAutoRepair() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := time.Now()
+	keep := w.autoRepairs[:0]
+	for _, t := range w.autoRepairs {
+		if now.Sub(t) < autoRepairWindow {
+			keep = append(keep, t)
+		}
+	}
+	keep = append(keep, now)
+	w.autoRepairs = keep
+	return len(keep) <= maxAutoRepairs
+}
+
 func (w *Worker) onEvent(evt any) {
 	switch e := evt.(type) {
 	case *events.LoggedOut:
-		log.Printf("[whatsapp] logged out (reason %v) — admin re-auth required", e.Reason)
-		w.setStatus("logged_out", "")
+		// Server killed the session: recover alone with a fresh pairing
+		// window so a QR is already waiting when the admin opens the
+		// panel. Repeated kills park for a human (likely ban/ToS).
+		if w.recordAutoRepair() {
+			log.Printf("[whatsapp] logged out (reason %v) — auto-starting fresh pairing", e.Reason)
+			w.mu.Lock()
+			w.logoutAt = time.Now()
+			w.mu.Unlock()
+			select {
+			case w.logoutCh <- struct{}{}:
+			default:
+			}
+		} else {
+			log.Printf("[whatsapp] logged out (reason %v) repeatedly — admin re-auth required", e.Reason)
+			w.setStatus("logged_out", "")
+		}
 		return
 	case *events.Connected:
 		log.Println("[whatsapp] socket connected")
@@ -1068,6 +1245,10 @@ func (w *Worker) Logout(ctx context.Context) error {
 	}
 	w.mu.Lock()
 	w.lastQR, w.lastJID = "", ""
+	w.qrAt = time.Time{}
+	w.pairPhone = ""
+	w.pairCode = ""
+	w.pairCodeExp = time.Time{}
 	w.mu.Unlock()
 	w.setStatus("logged_out", "")
 	return nil
