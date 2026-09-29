@@ -382,7 +382,7 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 	reply := e.GetResponse(ctx, "flow_complete")
 
 	// Check if this flow triggers vehicle matching
-	if flowID != nil && *flowID != "" && e.matcher != nil && leadID != "" {
+	if flowID != nil && *flowID != "" && leadID != "" {
 		var triggerMatching bool
 		err := tx.QueryRow(ctx, `SELECT trigger_matching FROM bot_flows WHERE id=$1`, *flowID).Scan(&triggerMatching)
 		if err == nil && triggerMatching {
@@ -392,9 +392,19 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 			if len(rawData) > 0 {
 				_ = json.Unmarshal(rawData, &extracted)
 			}
-			matchMsg, err := e.matcher(ctx, tx, leadID, extracted)
-			if err == nil && strings.TrimSpace(matchMsg) != "" {
-				reply = reply + "\n\n" + matchMsg
+			if e.matcher != nil {
+				matchMsg, err := e.matcher(ctx, tx, leadID, extracted)
+				if err == nil && strings.TrimSpace(matchMsg) != "" {
+					reply = reply + "\n\n" + matchMsg
+				}
+			} else {
+				matches, err := MatchVehicles(ctx, tx, leadID, extracted)
+				if err == nil {
+					matchMsg := FormatMatches(matches)
+					if strings.TrimSpace(matchMsg) != "" {
+						reply = reply + "\n\n" + matchMsg
+					}
+				}
 			}
 		}
 	}
