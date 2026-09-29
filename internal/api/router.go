@@ -280,6 +280,32 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.listSettings(w, r)
 	case p == "/api/settings" && r.Method == "PATCH":
 		s.patchSettings(w, r)
+	case p == "/api/bot/flows" && r.Method == "GET":
+		s.listBotFlows(w, r)
+	case p == "/api/bot/flows" && r.Method == "POST":
+		s.createBotFlow(w, r)
+	case strings.HasPrefix(p, "/api/bot/flows/") && strings.HasSuffix(p, "/questions") && r.Method == "GET":
+		s.listBotQuestions(w, r)
+	case strings.HasPrefix(p, "/api/bot/flows/") && r.Method == "PATCH":
+		s.patchBotFlow(w, r)
+	case strings.HasPrefix(p, "/api/bot/flows/") && r.Method == "DELETE":
+		s.deleteBotFlow(w, r)
+	case p == "/api/bot/questions" && r.Method == "POST":
+		s.createBotQuestion(w, r)
+	case strings.HasPrefix(p, "/api/bot/questions/") && r.Method == "PATCH":
+		s.patchBotQuestion(w, r)
+	case strings.HasPrefix(p, "/api/bot/questions/") && r.Method == "DELETE":
+		s.deleteBotQuestion(w, r)
+	case strings.HasPrefix(p, "/api/bot/conditions/") && r.Method == "GET":
+		s.listBotConditions(w, r)
+	case p == "/api/bot/conditions" && r.Method == "POST":
+		s.createBotCondition(w, r)
+	case strings.HasPrefix(p, "/api/bot/conditions/") && r.Method == "DELETE":
+		s.deleteBotCondition(w, r)
+	case p == "/api/bot/responses" && r.Method == "GET":
+		s.listBotResponses(w, r)
+	case strings.HasPrefix(p, "/api/bot/responses/") && r.Method == "PATCH":
+		s.patchBotResponse(w, r)
 	case p == "/api/whatsapp/status" && r.Method == "GET":
 		writeJSON(w, s.WA.Status())
 	case p == "/api/whatsapp/qr" && r.Method == "GET":

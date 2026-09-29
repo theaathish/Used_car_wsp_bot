@@ -1,0 +1,157 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"sellingbot/internal/auth"
+)
+
+func setupTestServer(t *testing.T) (*Server, string, func()) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://localhost/sellingbot_test?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	secret := "test-secret-key-1234567890123456"
+	srv := &Server{
+		Pool:   pool,
+		Secret: secret,
+	}
+
+	token, err := auth.Sign(secret, "admin-1", "admin@test.com", "admin")
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+
+	cleanup := func() {
+		pool.Close()
+	}
+	return srv, token, cleanup
+}
+
+func TestBotAdmin_CRUD(t *testing.T) {
+	srv, token, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	handler := srv.Router(http.Dir(t.TempDir()))
+
+	doReq := func(method, path string, body any) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		if body != nil {
+			_ = json.NewEncoder(&buf).Encode(body)
+		}
+		req := httptest.NewRequest(method, path, &buf)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Create Flow
+	rec := doReq("POST", "/api/bot/flows", map[string]any{
+		"name":             "Admin Test Flow",
+		"slug":             "admin_test_flow",
+		"is_entry_flow":    false,
+		"trigger_matching": true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create flow code = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	var flowResp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &flowResp)
+	flowID := flowResp["id"].(string)
+
+	// 2. List Flows
+	rec = doReq("GET", "/api/bot/flows", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list flows code = %d", rec.Code)
+	}
+
+	// 3. Patch Flow
+	rec = doReq("PATCH", "/api/bot/flows/"+flowID, map[string]any{
+		"name": "Updated Flow Name",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch flow code = %d", rec.Code)
+	}
+
+	// 4. Create Question
+	rec = doReq("POST", "/api/bot/questions", map[string]any{
+		"flow_id":        flowID,
+		"field_name":     "budget",
+		"question_text":  "What is your budget?",
+		"question_type":  "number",
+		"allowed_values": []string{},
+		"order_index":    1,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create question code = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	var qResp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &qResp)
+	qID := qResp["id"].(string)
+
+	// 5. List Questions for Flow
+	rec = doReq("GET", "/api/bot/flows/"+flowID+"/questions", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list questions code = %d", rec.Code)
+	}
+
+	// 6. Create Condition
+	rec = doReq("POST", "/api/bot/conditions", map[string]any{
+		"question_id": qID,
+		"field_name":  "budget",
+		"operator":    "GREATER_THAN",
+		"value":       "50000",
+		"priority":    1,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create condition code = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	var condResp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &condResp)
+	condID := condResp["id"].(string)
+
+	// 7. List Conditions
+	rec = doReq("GET", "/api/bot/conditions/"+qID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list conditions code = %d", rec.Code)
+	}
+
+	// 8. Delete Condition
+	rec = doReq("DELETE", "/api/bot/conditions/"+condID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete condition code = %d", rec.Code)
+	}
+
+	// 9. Delete Question
+	rec = doReq("DELETE", "/api/bot/questions/"+qID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete question code = %d", rec.Code)
+	}
+
+	// 10. Delete Flow
+	rec = doReq("DELETE", "/api/bot/flows/"+flowID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete flow code = %d", rec.Code)
+	}
+
+	// 11. List Responses
+	rec = doReq("GET", "/api/bot/responses", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list responses code = %d", rec.Code)
+	}
+}
