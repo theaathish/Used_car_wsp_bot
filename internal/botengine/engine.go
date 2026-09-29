@@ -332,20 +332,36 @@ func (e *Engine) evaluateNextStep(ctx context.Context, tx pgx.Tx, q *Question, n
 func matchesCondition(inputVal, operator, condVal string) bool {
 	op := strings.ToUpper(strings.TrimSpace(operator))
 	switch op {
-	case "EQUALS", "=":
+	case "EQUALS", "=", "EQ":
 		return strings.EqualFold(strings.TrimSpace(inputVal), strings.TrimSpace(condVal))
-	case "NOT_EQUALS", "!=":
+	case "NOT_EQUALS", "!=", "NEQ":
 		return !strings.EqualFold(strings.TrimSpace(inputVal), strings.TrimSpace(condVal))
 	case "CONTAINS":
 		return strings.Contains(strings.ToLower(inputVal), strings.ToLower(condVal))
-	case "GREATER_THAN", ">":
+	case "GREATER_THAN", ">", "GT":
 		inNum, err1 := strconv.ParseFloat(strings.TrimSpace(inputVal), 64)
 		condNum, err2 := strconv.ParseFloat(strings.TrimSpace(condVal), 64)
 		return err1 == nil && err2 == nil && inNum > condNum
-	case "LESS_THAN", "<":
+	case "LESS_THAN", "<", "LT":
 		inNum, err1 := strconv.ParseFloat(strings.TrimSpace(inputVal), 64)
 		condNum, err2 := strconv.ParseFloat(strings.TrimSpace(condVal), 64)
 		return err1 == nil && err2 == nil && inNum < condNum
+	case "GTE", ">=":
+		inNum, err1 := strconv.ParseFloat(strings.TrimSpace(inputVal), 64)
+		condNum, err2 := strconv.ParseFloat(strings.TrimSpace(condVal), 64)
+		return err1 == nil && err2 == nil && inNum >= condNum
+	case "LTE", "<=":
+		inNum, err1 := strconv.ParseFloat(strings.TrimSpace(inputVal), 64)
+		condNum, err2 := strconv.ParseFloat(strings.TrimSpace(condVal), 64)
+		return err1 == nil && err2 == nil && inNum <= condNum
+	case "IN":
+		parts := strings.Split(condVal, ",")
+		for _, p := range parts {
+			if strings.EqualFold(strings.TrimSpace(inputVal), strings.TrimSpace(p)) {
+				return true
+			}
+		}
+		return false
 	default:
 		return strings.EqualFold(inputVal, condVal)
 	}
