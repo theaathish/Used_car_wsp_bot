@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"sellingbot/internal/auth"
+	"sellingbot/internal/botengine"
+	"sellingbot/internal/whatsapp"
 )
 
 func setupTestServer(t *testing.T) (*Server, string, func()) {
@@ -25,9 +28,12 @@ func setupTestServer(t *testing.T) (*Server, string, func()) {
 	}
 
 	secret := "test-secret-key-1234567890123456"
+	engine := botengine.New(pool)
+	wa := whatsapp.New(pool, t.TempDir(), false, dsn, engine)
 	srv := &Server{
 		Pool:   pool,
 		Secret: secret,
+		WA:     wa,
 	}
 
 	token, err := auth.Sign(secret, "admin-1", "admin@test.com", "admin")
@@ -153,5 +159,35 @@ func TestBotAdmin_CRUD(t *testing.T) {
 	rec = doReq("GET", "/api/bot/responses", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list responses code = %d", rec.Code)
+	}
+}
+
+func TestSimulateEndpoint(t *testing.T) {
+	srv, token, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	handler := srv.Router(http.Dir(t.TempDir()))
+
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(map[string]any{
+		"body": "hi",
+	})
+	req := httptest.NewRequest("POST", "/api/whatsapp/simulate", &buf)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("simulate status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	var res map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &res)
+	reply, _ := res["reply"].(string)
+	if reply == "" {
+		t.Fatalf("expected non-empty reply, got %v", res)
+	}
+	if !strings.Contains(reply, "SUV") && !strings.Contains(reply, "Welcome") {
+		t.Fatalf("expected welcome or entry question, got %q", reply)
 	}
 }

@@ -1387,19 +1387,14 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		freshSession = true
 	}
 	// lead (latest non-terminal; a fresh session always starts a new lead)
-	var leadID, state, intent, status, interest string
-	var stateRaw []byte
-	err = tx.QueryRow(ctx, `SELECT id::text, state, intent, status, COALESCE(interest,''), state_data FROM leads WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1`, custID).Scan(&leadID, &state, &intent, &status, &interest, &stateRaw)
+	var leadID, status string
+	err = tx.QueryRow(ctx, `SELECT id::text, status FROM leads WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 1`, custID).Scan(&leadID, &status)
 	if err != nil || freshSession || status == "DONE" || status == "LOST" {
 		leadID = uuid.NewString()
-		state, intent, status, interest = "NEW", "UNKNOWN", "NEW", ""
-		stateRaw = []byte("{}")
 		if _, err := tx.Exec(ctx, `INSERT INTO leads(id,customer_id,intent,status,state,source) VALUES($1,$2,'UNKNOWN','NEW','NEW','whatsapp')`, leadID, custID); err != nil {
 			return "", err
 		}
 	}
-	data := map[string]string{}
-	_ = json.Unmarshal(stateRaw, &data)
 
 	if _, err := tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'in',$2,'PROCESSED')`, convID, body); err != nil {
 		return "", err
