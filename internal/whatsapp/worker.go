@@ -29,12 +29,15 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	_ "github.com/mattn/go-sqlite3"
+
+	"sellingbot/internal/botengine"
 )
 
 // Worker wraps whatsmeow with Postgres-backed CRM state.
 // Session (device keys) lives in SQLite file on Railway volume.
 type Worker struct {
 	pool    *pgxpool.Pool
+	Engine  *botengine.Engine
 	enabled bool
 	dataDir string
 	dbURL   string
@@ -189,12 +192,15 @@ func (w *Worker) banActive() time.Time {
 	return time.Time{}
 }
 
-func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string) *Worker {
+func New(pool *pgxpool.Pool, dataDir string, enabled bool, dbURL string, engine *botengine.Engine) *Worker {
 	id := uuid.NewString()
 	if len(id) > 8 {
 		id = id[:8]
 	}
-	return &Worker{pool: pool, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1), wakeCh: make(chan struct{}, 1), logoutCh: make(chan struct{}, 1), instanceID: id}
+	if engine == nil && pool != nil {
+		engine = botengine.New(pool)
+	}
+	return &Worker{pool: pool, Engine: engine, dataDir: dataDir, enabled: enabled, dbURL: dbURL, status: "connecting", repairCh: make(chan struct{}, 1), wakeCh: make(chan struct{}, 1), logoutCh: make(chan struct{}, 1), instanceID: id}
 }
 
 // leaderTTL is how long a leader claim stays valid without a heartbeat.
@@ -1410,362 +1416,22 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 		return "", nil
 	}
 
-	// STATE-004: corrupt state recovers to menu instead of crashing.
-	if !validStates[state] {
-		log.Printf("[whatsapp] invalid state %q for %s, resetting", state, phone)
-		state, intent, status = "ASK_INTENT", "UNKNOWN", "CONTACTED"
-		data = map[string]string{}
-	}
-
-	// STATE-006 / menu: cancel current flow, back to menu.
-	if tb := norm(body); tb == "start again" || tb == "restart" || tb == "menu" || tb == "main menu" || tb == "hi menu" {
-		state, intent, status = "ASK_INTENT", "UNKNOWN", "CONTACTED"
-		data = map[string]string{}
-		reply := "No problem — starting fresh. Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE."
-		merged, _ := json.Marshal(data)
-		_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(merged), leadID)
-		_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
-		if err := tx.Commit(ctx); err != nil {
+	var reply string
+	if w.Engine != nil {
+		tb := norm(body)
+		if freshSession || isGreetingOnly(body) || tb == "start again" || tb == "restart" || tb == "menu" || tb == "main menu" || tb == "hi menu" {
+			reply, err = w.Engine.ResetConversation(ctx, tx, convID)
+		} else {
+			reply, err = w.Engine.ProcessMessage(ctx, tx, convID, custID, leadID, body)
+		}
+		if err != nil {
 			return "", err
 		}
-		return reply, nil
-	}
-
-	// "hi" is init-only: a bare greeting from any live state restarts the
-	// menu instead of landing in the current step as an answer (e.g. "hi"
-	// at BUY_RESULTS used to get the generic more-cars reply). NEW falls
-	// through to the normal welcome; takeover stays silent above.
-	if isGreetingOnly(body) && state != "NEW" {
-		data = map[string]string{}
-		reply := "Welcome back! Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE."
-		merged, _ := json.Marshal(data)
-		_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(merged), leadID)
-		_, _ = tx.Exec(ctx, `UPDATE conversations SET lead_id=$1, updated_at=now() WHERE id=$2`, leadID, convID)
-		_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
-		if err := tx.Commit(ctx); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE conversations SET lead_id=$1, updated_at=now() WHERE id=$2`, leadID, convID); err != nil {
 			return "", err
 		}
-		return reply, nil
-	}
-
-	// STATE-005: back to previous step.
-	if norm(body) == "back" || norm(body) == "go back" {
-		if prev := data["prev_state"]; prev != "" && validStates[prev] {
-			prevData := map[string]string{}
-			for k, v := range data {
-				prevData[k] = v
-			}
-			delete(prevData, "prev_state")
-			merged, _ := json.Marshal(prevData)
-			_, _ = tx.Exec(ctx, `UPDATE leads SET state=$1,state_data=$2,updated_at=now() WHERE id=$3`, prev, string(merged), leadID)
-			reply := "Back one step. " + promptFor(prev)
-			_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
-			if err := tx.Commit(ctx); err != nil {
-				return "", err
-			}
-			return reply, nil
-		}
-		// No step to go back to (e.g. double "back"): stay put instead of
-		// storing "back" as an answer like brand or model.
-		reply := "You're already at the start of this step. " + promptFor(state)
-		_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply)
-		if err := tx.Commit(ctx); err != nil {
-			return "", err
-		}
-		return reply, nil
-	}
-
-	// P0-13: explicit intent switch mid-flow restarts cleanly into the new flow.
-	if target := detectIntentSwitch(body, intent); target != "" {
-		log.Printf("[whatsapp] intent switch %s -> %s for %s", intent, target, phone)
-		state, intent, data = "ASK_INTENT", "UNKNOWN", map[string]string{}
-	}
-
-	prevState := state
-	next, reply, newIntent, newStatus, patch := Next(state, body, data)
-	moreCars := patch["page"] == "next"
-	delete(patch, "page")
-	for k, v := range patch {
-		data[k] = v
-	}
-	if newIntent != "" {
-		intent = newIntent
-	}
-	if newStatus != "" {
-		status = newStatus
-	}
-	if iv, ok := patch["interest"]; ok && iv != "" {
-		interest = iv
-	}
-	merged, _ := json.Marshal(dataWithPrev(data, prevState))
-	if _, err := tx.Exec(ctx, `UPDATE leads SET state=$1,intent=$2,status=$3,interest=$4,state_data=$5,updated_at=now() WHERE id=$6`, next, intent, status, interest, string(merged), leadID); err != nil {
-		return "", err
-	}
-	if _, err := tx.Exec(ctx, `UPDATE conversations SET lead_id=$1, updated_at=now() WHERE id=$2`, leadID, convID); err != nil {
-		return "", err
-	}
-
-	var photoJobs []photoJob
-
-	// BUY_RESULTS: first arrival runs matching; "more cars" pages forward
-	// through the WHOLE list; a bare number ("1") opens that car's details
-	// with ALL its photos; "more photos" resends the full set; any other
-	// model text starts a fresh search (sell loop, never a dead end).
-	if next == "BUY_RESULTS" {
-		research := false
-		if state == "BUY_RESULTS" && atoi(patch["select_idx"]) == 0 && patch["more_photos"] == "" && !moreCars && patch["interest"] == "" {
-			if nb := dropNoise(body); nb != "" {
-				if br, mo := extractBrandModel(nb); br != "" {
-					if ex := ExtractAll(nb); len(ex) > 0 {
-						for k, v := range ex {
-							data[k] = v
-						}
-						if ex["budget_max"] != "" {
-							delete(data, "budget_unknown") // explicit budget beats an old skip
-						}
-					}
-					if mo != "" {
-						data["brand"] = br
-						data["model"] = mo
-					} else {
-						data["model"] = br // single token: search by model, any make
-						data["brand"] = "ANY"
-					}
-					data["page_num"] = "0"
-					delete(data, "match_ids")
-					delete(data, "selected_vehicle")
-					m, _ := json.Marshal(data)
-					_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
-					research = true
-				}
-			}
-		}
-		page := atoi(data["page_num"])
-		if sel := atoi(patch["select_idx"]); sel > 0 {
-			if vd, ok := w.vehicleDetails(ctx, tx, data["match_ids"], sel); ok {
-				reply = vd.text + "\nLike it? Reply *YES* to confirm, *test drive* to book a visit, or *more cars* for others."
-				photoJobs = w.vehiclePhotoJobs(vd.photos, vd.caption, DetailViewPhotoLimit)
-				data["selected_vehicle"] = vd.id
-				m, _ := json.Marshal(data)
-				_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
-			} else {
-				total := len(strings.Split(data["match_ids"], ","))
-				if data["match_ids"] == "" {
-					total = 0
-				}
-				if total == 0 {
-					reply = "No cars in your list yet. Tell me your budget and brand, or reply *more cars* and our team will call with fresh arrivals."
-				} else {
-					reply = "That number isn't on the list. Reply a number 1–" + strconv.Itoa(total) + ", *more cars*, or *test drive*."
-				}
-			}
-		} else if patch["more_photos"] != "" {
-			vid := data["selected_vehicle"]
-			if vid == "" {
-				ids := strings.Split(data["match_ids"], ",")
-				if len(ids) > 0 {
-					vid = strings.TrimSpace(ids[0])
-				}
-			}
-			if _, err := uuid.Parse(vid); err != nil {
-				reply = "No photos uploaded for this car yet — our team will share them on call. Reply *YES* to confirm interest or *test drive* to visit."
-				vid = ""
-			} else if photos := w.vehiclePhotosTx(ctx, tx, vid, DetailViewPhotoLimit); len(photos) == 0 {
-				reply = "No photos uploaded for this car yet — our team will share them on call. Reply *YES* to confirm interest or *test drive* to visit."
-			} else {
-				cap_ := ""
-				if vd, ok := w.vehicleByID(ctx, tx, vid); ok {
-					cap_ = " of " + vd.caption
-				}
-				reply = "Here are all photos" + cap_ + ": Reply *YES* to confirm or *test drive* to book."
-				photoJobs = w.vehiclePhotoJobs(photos, strings.TrimPrefix(cap_, " of "), DetailViewPhotoLimit)
-			}
-		} else if moreCars {
-			page++
-			data["page_num"] = strconv.Itoa(page)
-			m, _ := json.Marshal(data)
-			_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
-			items := w.matchItemsTx(ctx, tx, data["match_ids"], page*3, 3)
-			if len(items) == 0 {
-				// Exhausted: restart cleanly (same wipe as intent-switch).
-				reply = "That's all the matches we have for your criteria. Let's start over — reply 1 BUY, 2 SELL, 3 EXCHANGE, or share new requirements."
-				next = "ASK_INTENT"
-				intent = "UNKNOWN"
-				status = "CONTACTED"
-				for k := range data {
-					delete(data, k)
-				}
-				m2, _ := json.Marshal(data)
-				_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(m2), leadID)
-			} else {
-				reply = "More options (reply the number to see photos):\n" + strings.Join(numbered(items, page*3+1), "\n")
-			}
-		} else if state != "BUY_RESULTS" || research {
-			exact, similar := runMatchingTx(ctx, tx, leadID, data)
-			combined := append(append([]matchItem{}, exact...), similar...)
-			// Page through the whole lot, not just the first screen.
-			if len(combined) > 1000 {
-				combined = combined[:1000]
-			}
-			// Name the sought vehicle so a miss is legible instead of a
-			// bare "no match" (e.g. "for BMW C400GT 2025").
-			want := ""
-			if d := describeFind(data); d != "" {
-				want = " for " + strings.TrimSuffix(d, ". ")
-			}
-			if research {
-				reply = "Searching" + want + ":"
-			}
-			if len(combined) == 0 {
-				// Zero matches on a fresh search: same restart as exhausted pages.
-				reply = "That's all the matches we have for your criteria. Let's start over — reply 1 BUY, 2 SELL, 3 EXCHANGE, or share new requirements."
-				next = "ASK_INTENT"
-				intent = "UNKNOWN"
-				status = "CONTACTED"
-				for k := range data {
-					delete(data, k)
-				}
-				m0, _ := json.Marshal(data)
-				_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(m0), leadID)
-			} else {
-				if len(exact) == 0 {
-					reply += "\nNo exact match" + want + ", but similar options (reply the number to see all photos):\n"
-				} else {
-					reply += "\nTop picks (reply the number to see all photos):\n"
-				}
-				first := combined
-				if len(first) > 3 {
-					first = first[:3]
-				}
-				reply += strings.Join(numbered(first, 1), "\n")
-				ids := make([]string, 0, len(combined))
-				for _, it := range combined {
-					ids = append(ids, it.id)
-				}
-				data["match_ids"] = strings.Join(ids, ",")
-				m, _ := json.Marshal(data)
-				_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1 WHERE id=$2`, string(m), leadID)
-				// One teaser photo of the top car; the full set comes when
-				// the buyer picks the number or asks for more photos.
-				if len(first) > 0 {
-					photoJobs = append(photoJobs, w.vehiclePhotoJobs(w.vehiclePhotosTx(ctx, tx, first[0].id, 1), first[0].text, 1)...)
-				}
-			}
-			_, _ = tx.Exec(ctx, `INSERT INTO requirements(lead_id,budget_min,budget_max,brand,model,fuel,transmission,year_min)
-				VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-				leadID, atoi(data["budget_min"]), atoi(data["budget_max"]), data["brand"], data["model"], data["fuel"], data["transmission"], atoi(data["year_min"]))
-			_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message) VALUES($1,$2,'post_match',now()+interval '24 hours','Follow up on matched cars') ON CONFLICT DO NOTHING`, custID, leadID)
-		}
-	}
-
-	// SELL inspection booking: slot first (mirrors test-drive booking).
-	// Reopened means ask again; valuation row below only fires on DONE.
-	inspHandled := false
-	if state == "SELL_INSPECTION" && next == "DONE" {
-		inspHandled = true
-		if inspReply, reopened := w.bookInspectionTx(ctx, tx, leadID, custID, body); reopened {
-			next = "SELL_INSPECTION"
-			mergedI, _ := json.Marshal(dataWithPrev(data, "SELL_INSPECTION"))
-			_, _ = tx.Exec(ctx, `UPDATE leads SET state='SELL_INSPECTION',state_data=$1,updated_at=now() WHERE id=$2`, string(mergedI), leadID)
-			reply = inspReply
-		} else {
-			reply = inspReply
-		}
-	}
-
-	// SELL done -> valuation handoff row (idempotent per lead). Fires only
-	// after the inspection is scheduled (prevState SELL_INSPECTION), so
-	// valuation staff work post-appointment. Guarded by prevState so a
-	// hijacked DONE can never file a junk VALUATION_PENDING row.
-	if prevState == "SELL_INSPECTION" && next == "DONE" && intent == "SELL" && inspHandled {
-		_, _ = tx.Exec(ctx, `INSERT INTO sell_requests(lead_id,brand,model,year,registration,km,fuel,transmission,condition,location,photo_count,status)
-			SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'VALUATION_PENDING'
-			WHERE NOT EXISTS (SELECT 1 FROM sell_requests WHERE lead_id=$1)`,
-			leadID, data["sell_brand"], data["sell_model"], atoi(data["sell_year"]), data["sell_reg"],
-			atoi(data["sell_km"]), data["sell_fuel"], data["sell_trans"], data["sell_specs"], data["sell_location"], atoi(data["sell_photos"]))
-	}
-
-	// EXCHANGE valuation queue row (idempotent per lead): staff prices the
-	// trade-in like SELL while the chat continues to new-car matching.
-	if prevState == "EXCHANGE_CURRENT" && next == "EXCHANGE_WANT" && intent == "EXCHANGE" {
-		_, _ = tx.Exec(ctx, `INSERT INTO exchange_valuations(lead_id,current_car,status)
-			SELECT $1,$2,'VALUATION_PENDING'
-			WHERE NOT EXISTS (SELECT 1 FROM exchange_valuations WHERE lead_id=$1)`,
-			leadID, data["exchange_current"])
-	}
-
-	// EXCHANGE_WANT -> same matching engine as BUY (top 3 + teaser).
-	// Keeps intent EXCHANGE, moves state into BUY_RESULTS so detail /
-	// photos / pagination / interest / test-drive all work downstream.
-	if prevState == "EXCHANGE_WANT" && next == "DONE" && intent == "EXCHANGE" {
-		_, _ = tx.Exec(ctx, `UPDATE exchange_valuations SET want=$1 WHERE lead_id=$2`, data["exchange_want"], leadID)
-		exact, similar := runMatchingTx(ctx, tx, leadID, data)
-		combined := append(append([]matchItem{}, exact...), similar...)
-		if len(combined) > 1000 {
-			combined = combined[:1000]
-		}
-		if len(combined) == 0 {
-			reply = "That's all the matches we have for your criteria. Let's start over — reply 1 BUY, 2 SELL, 3 EXCHANGE, or share new requirements."
-			next = "ASK_INTENT"
-			intent = "UNKNOWN"
-			status = "CONTACTED"
-			for k := range data {
-				delete(data, k)
-			}
-			m0, _ := json.Marshal(data)
-			_, _ = tx.Exec(ctx, `UPDATE leads SET state='ASK_INTENT',intent='UNKNOWN',status='CONTACTED',state_data=$1,updated_at=now() WHERE id=$2`, string(m0), leadID)
-		} else {
-			reply = "\nTop picks (reply the number to see all photos):\n"
-			first := combined
-			if len(first) > 3 {
-				first = first[:3]
-			}
-			reply += strings.Join(numbered(first, 1), "\n")
-			ids := make([]string, 0, len(combined))
-			for _, it := range combined {
-				ids = append(ids, it.id)
-			}
-			data["match_ids"] = strings.Join(ids, ",")
-			data["page_num"] = "0"
-			next = "BUY_RESULTS"
-			status = "QUALIFIED"
-			m, _ := json.Marshal(dataWithPrev(data, "EXCHANGE_WANT"))
-			_, _ = tx.Exec(ctx, `UPDATE leads SET state='BUY_RESULTS',status='QUALIFIED',state_data=$1,updated_at=now() WHERE id=$2`, string(m), leadID)
-			if len(first) > 0 {
-				photoJobs = append(photoJobs, w.vehiclePhotoJobs(w.vehiclePhotosTx(ctx, tx, first[0].id, 1), first[0].text, 1)...)
-			}
-			_, _ = tx.Exec(ctx, `INSERT INTO requirements(lead_id,budget_min,budget_max,brand,model,fuel,transmission,year_min)
-				VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-				leadID, atoi(data["budget_min"]), atoi(data["budget_max"]), data["brand"], data["model"], data["fuel"], data["transmission"], atoi(data["year_min"]))
-			_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message) VALUES($1,$2,'post_match',now()+interval '24 hours','Follow up on matched cars') ON CONFLICT DO NOTHING`, custID, leadID)
-		}
-	}
-
-	// Finance enquiry captured (income is INT: use 0, never '').
-	if fr, ok := data["finance_raw"]; ok && fr != "" && next == "DONE" {
-		_, _ = tx.Exec(ctx, `INSERT INTO finance_requests(lead_id,loan_amount,tenure_months,employment,income,status)
-			SELECT $1,0,0,'',0, 'NEW' WHERE NOT EXISTS (SELECT 1 FROM finance_requests WHERE lead_id=$1)`, leadID)
-	}
-
-	// Test-drive details arrived: book a real slot when possible, otherwise
-	// reopen the question. Either way the generic sales-followup is skipped.
-	tdHandled := false
-	if state == "TESTDRIVE_ASK" && next == "DONE" {
-		tdHandled = true
-		if tdReply, reopened := w.bookTestDriveTx(ctx, tx, leadID, custID, body, data); reopened {
-			next = "TESTDRIVE_ASK"
-			merged2, _ := json.Marshal(dataWithPrev(data, "TESTDRIVE_ASK"))
-			_, _ = tx.Exec(ctx, `UPDATE leads SET state='TESTDRIVE_ASK',state_data=$1,updated_at=now() WHERE id=$2`, string(merged2), leadID)
-			reply = tdReply
-		} else {
-			reply = tdReply
-		}
-	}
-
-	// Test-drive request without a firm slot -> sales followup
-	if tr, ok := data["testdrive_raw"]; ok && tr != "" && next == "DONE" && !tdHandled {
-		_, _ = tx.Exec(ctx, `INSERT INTO followups(customer_id,lead_id,type,scheduled_at,message)
-			VALUES($1,$2,'testdrive_request',now()+interval '1 hour',$3) ON CONFLICT DO NOTHING`, custID, leadID, "Test drive request: "+tr)
+	} else {
+		reply = "Welcome! How can we help you today?"
 	}
 
 	if reply != "" {
@@ -1775,9 +1441,6 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", err
-	}
-	if len(photoJobs) > 0 {
-		go w.sendPhotos(phone, photoJobs)
 	}
 	return reply, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"sellingbot/internal/api"
+	"sellingbot/internal/botengine"
 	"sellingbot/internal/config"
 	"sellingbot/internal/db"
 	"sellingbot/internal/images"
@@ -99,7 +100,8 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("")
 	}
-	wa := whatsapp.New(pool, cfg.DataDir, cfg.WhatsappEnabled, cfg.DatabaseURL)
+	engine := botengine.New(pool)
+	wa := whatsapp.New(pool, cfg.DataDir, cfg.WhatsappEnabled, cfg.DatabaseURL, engine)
 	go wa.Start(ctx)
 	go scheduler.Followups(ctx, pool, wa)
 

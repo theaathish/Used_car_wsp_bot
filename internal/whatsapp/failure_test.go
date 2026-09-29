@@ -27,7 +27,7 @@ func TestFailureAccounting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	w := New(pool, t.TempDir(), true, "")
+	w := New(pool, t.TempDir(), true, "", nil)
 	done := make(chan map[string]any, 1)
 	go func() {
 		for i := 0; i < 16; i++ {
@@ -88,7 +88,7 @@ func TestFlapBackoff(t *testing.T) {
 // A worker without a pool (standalone / unit context) must fail open as
 // leader so single-process behaviour is unchanged.
 func TestClaimLeadershipNoPool(t *testing.T) {
-	w := New(nil, t.TempDir(), true, "")
+	w := New(nil, t.TempDir(), true, "", nil)
 	if !w.claimLeadership(context.Background()) {
 		t.Fatal("nil-pool worker must be leader")
 	}
@@ -101,7 +101,7 @@ func TestClaimLeadershipNoPool(t *testing.T) {
 // Pair-code requests validate before touching anything: bad numbers fail,
 // connected workers refuse, idle workers ask for a pairing window first.
 func TestRequestPairCodeValidation(t *testing.T) {
-	w := New(nil, t.TempDir(), true, "")
+	w := New(nil, t.TempDir(), true, "", nil)
 	for _, bad := range []string{"", "abc", "0123", "12345", "12345678901234567"} {
 		if _, _, err := w.RequestPairCode(bad); err == nil {
 			t.Fatalf("want error for %q", bad)
@@ -120,7 +120,7 @@ func TestRequestPairCodeValidation(t *testing.T) {
 // Logout auto-repair allows a few recoveries then parks for a human;
 // old entries age out of the window.
 func TestRecordAutoRepair(t *testing.T) {
-	w := New(nil, t.TempDir(), true, "")
+	w := New(nil, t.TempDir(), true, "", nil)
 	for i := 0; i < 3; i++ {
 		if !w.recordAutoRepair() {
 			t.Fatalf("repair %d should proceed", i+1)
