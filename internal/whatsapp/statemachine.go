@@ -358,18 +358,12 @@ func wantsBuy(b string) bool {
 
 func wantsSell(b string) bool { return strings.Contains(b, "sell") }
 
-func wantsExchange(b string) bool {
-	return strings.Contains(b, "exchange") || strings.Contains(b, "replace")
-}
-
 // detectIntentSwitch reports when a mid-flow message explicitly starts a
 // different intent (P0-13). Returns the new intent or "".
 func detectIntentSwitch(body, currentIntent string) string {
 	b := norm(body)
 	switch {
-	case wantsExchange(b) && currentIntent != "EXCHANGE":
-		return "EXCHANGE"
-	case wantsSell(b) && !strings.Contains(b, "exchange") && currentIntent != "SELL":
+	case wantsSell(b) && currentIntent != "SELL":
 		return "SELL"
 	case wantsBuy(b) && currentIntent != "BUY" && currentIntent != "UNKNOWN" && currentIntent != "":
 		return "BUY"
@@ -524,29 +518,28 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	}
 	patch := map[string]string{}
 	if !validStates[state] {
-		return "ASK_INTENT", "Something got mixed up — let's start fresh. Are you looking to *BUY*, *SELL* or *EXCHANGE* a car?", "", "CONTACTED", patch
+		return "ASK_INTENT", "Something got mixed up — let's start fresh. Are you looking to *BUY* or *SELL* a car?", "", "CONTACTED", patch
 	}
 	b := norm(body)
 
-	// sellFlow/exchangeFlow guard the global shortcuts below: a word like
-	// "loan" or "more cars" inside a SELL/EXCHANGE answer must not hijack
+	// sellFlow guards the global shortcuts below: a word like
+	// "loan" or "more cars" inside a SELL answer must not hijack
 	// the flow (flow-bug: partial sell data + hijacked state).
 	sellFlow := strings.HasPrefix(state, "SELL_")
-	exchangeFlow := strings.HasPrefix(state, "EXCHANGE_")
 
 	// Global commands valid in any post-match state.
 	switch {
-	case strings.Contains(b, "more") && strings.Contains(b, "car") && !sellFlow && !exchangeFlow:
+	case strings.Contains(b, "more") && strings.Contains(b, "car") && !sellFlow:
 		patch["page"] = "next"
 		return "BUY_RESULTS", "Showing more cars for you...", "", "", patch
 	case (strings.Contains(b, "more photo") || strings.Contains(b, "all photo") || strings.Contains(b, "send photo") || b == "photos" || b == "photo") && state == "BUY_RESULTS":
 		patch["more_photos"] = "1"
 		return "BUY_RESULTS", "Sending all photos...", "", "", patch
-	case (strings.Contains(b, "finance") || strings.Contains(b, "loan") || strings.Contains(b, "emi")) && !sellFlow && !exchangeFlow:
+	case (strings.Contains(b, "finance") || strings.Contains(b, "loan") || strings.Contains(b, "emi")) && !sellFlow:
 		return "FINANCE_INFO", "We offer loan assistance through partner banks. Reply with: loan amount, tenure (months), employment type and monthly income — e.g. *RM 200,000, 60 months, salaried, 80000*. Our finance team will call you. (No payment is taken on WhatsApp.)", "", "FOLLOWUP", patch
 	case strings.Contains(b, "not interested") || strings.Contains(b, "not intrested") || strings.Contains(b, "no thanks") || strings.Contains(b, "drop"):
 		patch["interest"] = "NOT_INTERESTED"
-		return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY*, *SELL* or *EXCHANGE* anytime.", "", "LOST", patch
+		return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY* or *SELL* anytime.", "", "LOST", patch
 	case strings.Contains(b, "think") || strings.Contains(b, "decide") || strings.Contains(b, "later") || strings.Contains(b, "call me back"):
 		patch["interest"] = "THINKING"
 		return state, "Sure, take your time! When should we follow up — tomorrow or next week?", "", "FOLLOWUP", patch
@@ -556,17 +549,17 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case (b == "yes" || b == "yeah" || b == "yep" || b == "yes i like it" || strings.HasPrefix(b, "confirm")) && state == "BUY_RESULTS":
 		patch["interest"] = "INTERESTED"
 		return state, "Confirmed! Our salesperson will call you shortly to take it forward. You can also ask for a *test drive* with date/time.", "", "QUALIFIED", patch
-	case strings.Contains(b, "test") && strings.Contains(b, "drive") && !sellFlow && !exchangeFlow:
+	case strings.Contains(b, "test") && strings.Contains(b, "drive") && !sellFlow:
 		return "TESTDRIVE_ASK", "To book a test drive, reply with the car number or name plus day and time — e.g. *1, tomorrow 10am* or *Swift, Saturday 4pm*. Our team confirms the slot.", "", "TEST_DRIVE", patch
 	}
 
 	switch state {
 	case "NEW":
 		// First message with a clear intent skips the menu.
-		if wantsBuy(b) || wantsSell(b) || wantsExchange(b) {
+		if wantsBuy(b) || wantsSell(b) {
 			return Next("ASK_INTENT", body, data)
 		}
-		return "ASK_INTENT", "Welcome to AutoKart! Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE (or type the word).", "", "CONTACTED", patch
+		return "ASK_INTENT", "Welcome to AutoKart! Reply 1️⃣ BUY or 2️⃣ SELL (or type the word).", "", "CONTACTED", patch
 	case "DONE":
 		// Finished flows restart instead of trapping the user in the
 		// fallback reply: wipe stale answers, then route like a new chat.
@@ -574,21 +567,19 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			delete(data, k)
 		}
 		if isGreeting(body) {
-			return "ASK_INTENT", "Welcome back! Reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE.", "", "CONTACTED", patch
+			return "ASK_INTENT", "Welcome back! Reply 1️⃣ BUY or 2️⃣ SELL.", "", "CONTACTED", patch
 		}
 		return Next("ASK_INTENT", body, data)
 	case "ASK_INTENT":
-		// QR-friendly numbered menu: 1=BUY 2=SELL 3=EXCHANGE (text still works).
+		// QR-friendly numbered menu: 1=BUY 2=SELL (text still works).
 		// Inbound button/list taps arrive as their label/ID via messageText,
 		// so they flow through the same word matching below.
-		if c := parseChoice(body); c >= 1 && c <= 3 {
+		if c := parseChoice(body); c >= 1 && c <= 2 {
 			switch c {
 			case 1:
 				b = "buy"
 			case 2:
 				b = "sell"
-			case 3:
-				b = "exchange"
 			}
 		}
 		switch {
@@ -608,10 +599,8 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 				return nxt, "Thanks! Let me find matching cars for you...", "BUY", "QUALIFIED", patch
 			}
 			return nxt, "Great, you want to *BUY*! "+promptFor(nxt), "BUY", "QUALIFIED", patch
-		case strings.Contains(b, "sell") && !strings.Contains(b, "exchange"):
+		case strings.Contains(b, "sell"):
 			return "SELL_CAR", "Sure! Which car do you want to sell? (brand + model, e.g. *Swift VDI*)", "SELL", "QUALIFIED", patch
-		case strings.Contains(b, "exchange") || strings.Contains(b, "replace"):
-			return "EXCHANGE_CURRENT", "Got it. Which is your current car? (brand, model, year, km — e.g. *Alto 2016, 60000km*)", "EXCHANGE", "QUALIFIED", patch
 		default:
 			// Direct model search ("BMW C400GT", "C400GT 2025", "Swift diesel"):
 			// no intent word but clearly a vehicle -> show stock NOW with
@@ -638,7 +627,7 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 				}
 				return "BUY_RESULTS", "Showing matches for " + describeFind(merge(data, patch)) + "Reply the number for photos, *more cars* for the rest.", "BUY", "QUALIFIED", patch
 			}
-			return "ASK_INTENT", "Please reply 1️⃣ BUY, 2️⃣ SELL or 3️⃣ EXCHANGE.", "", "CONTACTED", patch
+			return "ASK_INTENT", "Please reply 1️⃣ BUY or 2️⃣ SELL.", "", "CONTACTED", patch
 		}
 	case "BUY_BUDGET":
 		if unknownBudget(body) || parseChoice(body) == 0 {
@@ -864,13 +853,13 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 			case 3:
 				patch["interest"] = "NOT_INTERESTED"
 				patch["post_td"] = "1"
-				return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY*, *SELL* or *EXCHANGE* anytime.", "", "LOST", patch
+				return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY* or *SELL* anytime.", "", "LOST", patch
 			}
 		}
 		if strings.Contains(b, "not interested") || strings.Contains(b, "not intrested") || strings.Contains(b, "no thanks") || strings.Contains(b, "drop") {
 			patch["interest"] = "NOT_INTERESTED"
 			patch["post_td"] = "1"
-			return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY*, *SELL* or *EXCHANGE* anytime.", "", "LOST", patch
+			return "DONE", "No problem! We'll not follow up aggressively. Reply *BUY* or *SELL* anytime.", "", "LOST", patch
 		}
 		if strings.Contains(b, "think") || strings.Contains(b, "decide") || strings.Contains(b, "later") || strings.Contains(b, "call me back") || strings.Contains(b, "thinking") {
 			patch["interest"] = "THINKING"
@@ -949,20 +938,11 @@ func Next(state, body string, data map[string]string) (string, string, string, s
 	case "SELL_INSPECTION":
 		patch["inspection_raw"] = strings.TrimSpace(body)
 		return "DONE", "Thanks! Your inspection request is recorded. We'll confirm the slot shortly.", "SELL", "FOLLOWUP", patch
-	case "EXCHANGE_CURRENT":
-		patch["exchange_current"] = strings.TrimSpace(body)
-		return "EXCHANGE_WANT", "Thanks! We'll value your current car and get back to you shortly. What new car are you looking for? (budget + brand, e.g. Creta under RM 200,000)", "EXCHANGE", "QUALIFIED", patch
-	case "EXCHANGE_WANT":
-		patch["exchange_want"] = strings.TrimSpace(body)
-		for k, v := range ExtractAll(body) {
-			patch[k] = v
-		}
-		return "DONE", "Thanks! We'll arrange valuation of your old car + show matching cars. Our team will call you.", "EXCHANGE", "FOLLOWUP", patch
 	default:
 		if strings.Contains(b, "hi") || strings.Contains(b, "hello") || strings.Contains(b, "hey") {
-			return state, "Hello! How can I help — *BUY*, *SELL* or *EXCHANGE*?", "", "", patch
+			return state, "Hello! How can I help — *BUY* or *SELL*?", "", "", patch
 		}
-		return state, "Noted. Our sales team will follow up. Reply *BUY*, *SELL* or *EXCHANGE* to continue.", "", "", patch
+		return state, "Noted. Our sales team will follow up. Reply *BUY* or *SELL* to continue.", "", "", patch
 	}
 }
 

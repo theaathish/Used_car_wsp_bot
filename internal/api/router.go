@@ -254,14 +254,6 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.createPayment(w, r)
 	case strings.HasPrefix(p, "/api/payments/") && r.Method == "PATCH":
 		s.patchPayment(w, r)
-	case p == "/api/exchange-valuations" && r.Method == "GET":
-		s.listExchangeValuations(w, r)
-	case strings.HasPrefix(p, "/api/exchange-valuations/") && strings.HasSuffix(p, "/accept") && r.Method == "POST":
-		s.acceptExchange(w, r)
-	case strings.HasPrefix(p, "/api/exchange-valuations/") && strings.HasSuffix(p, "/reject") && r.Method == "POST":
-		s.rejectExchange(w, r)
-	case strings.HasPrefix(p, "/api/exchange-valuations/") && strings.HasSuffix(p, "/reopen") && r.Method == "POST":
-		s.reopenExchange(w, r)
 	case p == "/api/inspections" && r.Method == "GET":
 		s.listInspections(w, r)
 	case strings.HasPrefix(p, "/api/inspections/") && r.Method == "PATCH":

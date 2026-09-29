@@ -154,14 +154,6 @@ func TestSellFlow(t *testing.T) {
 	}
 }
 
-func TestExchangeFlow(t *testing.T) {
-	data := map[string]string{}
-	st, _, intent, _, _ := Next("ASK_INTENT", "exchange my car", data)
-	if st != "EXCHANGE_CURRENT" || intent != "EXCHANGE" {
-		t.Fatalf("exchange: %s %s", st, intent)
-	}
-}
-
 func TestParseBudget(t *testing.T) {
 	mn, mx := ParseBudget("4 lakh")
 	if mx != 400000 || mn == 0 {

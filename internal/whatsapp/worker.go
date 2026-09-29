@@ -339,7 +339,7 @@ var validStates = map[string]bool{
 	"BUY_TRANS": true, "BUY_YEAR": true, "BUY_RESULTS": true,
 	"FINANCE_INFO": true, "TESTDRIVE_ASK": true, "POST_TESTDRIVE_FOLLOWUP": true,
 	"SELL_CAR": true, "SELL_YEAR": true, "SELL_DETAILS": true, "SELL_SPECS": true, "SELL_PHOTOS": true, "SELL_INSPECTION": true,
-	"EXCHANGE_CURRENT": true, "EXCHANGE_WANT": true, "DONE": true,
+	"DONE": true,
 }
 
 func (w *Worker) Status() map[string]any {
@@ -1535,7 +1535,7 @@ func (w *Worker) HandleMedia(ctx context.Context, phone, name, waMsgID string, d
 	if state == "DONE" {
 		// Request already closed (e.g. valuation recorded): don't reopen the
 		// flow with photo noise, just close the loop politely.
-		ack = "Thanks! Your request is already recorded — our team will call you. Reply BUY, SELL or EXCHANGE for anything new."
+		ack = "Thanks! Your request is already recorded — our team will call you. Reply BUY or SELL for anything new."
 	} else if state == "SELL_PHOTOS" {
 		data := map[string]string{}
 		_ = json.Unmarshal(stateRaw, &data)
@@ -1550,7 +1550,7 @@ func (w *Worker) HandleMedia(ctx context.Context, phone, name, waMsgID string, d
 		m, _ := json.Marshal(dataWithPrev(data, state))
 		_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1, updated_at=now() WHERE id=$2`, string(m), leadID)
 	} else {
-		ack += " Our team can view it. How can I help — *BUY*, *SELL* or *EXCHANGE*?"
+		ack += " Our team can view it. How can I help — *BUY* or *SELL*?"
 	}
 	_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, ack)
 	if err := tx.Commit(ctx); err != nil {

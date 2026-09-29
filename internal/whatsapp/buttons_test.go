@@ -35,7 +35,6 @@ func TestButtonChoices(t *testing.T) {
 	}{
 		{"menu_1_buy", "ASK_INTENT", "1", nil, "BUY_BUDGET", "", ""},
 		{"menu_2_sell", "ASK_INTENT", "2", nil, "SELL_CAR", "", ""},
-		{"menu_3_exchange", "ASK_INTENT", "3", nil, "EXCHANGE_CURRENT", "", ""},
 		{"menu_1_dot", "ASK_INTENT", "1.", nil, "BUY_BUDGET", "", ""},
 		{"menu_option2", "ASK_INTENT", "option 2", nil, "SELL_CAR", "", ""},
 		{"menu_word_still_works", "ASK_INTENT", "buy", nil, "BUY_BUDGET", "", ""},

@@ -232,14 +232,14 @@ func TestHundred(t *testing.T) {
 				t.Fatal("buy must not detect SELL")
 			}
 		}},
-		{"TC38_exchange_detect", func(t *testing.T) {
-			if !wantsExchange(norm("exchange my car")) {
-				t.Fatal("must detect EXCHANGE")
+		{"TC38_no_exchange_intent", func(t *testing.T) {
+			if wantsSell(norm("exchange my car")) {
+				t.Fatal("exchange should not be sell")
 			}
 		}},
-		{"TC39_exchange_replace", func(t *testing.T) {
-			if !wantsExchange(norm("replace my car")) {
-				t.Fatal("must detect EXCHANGE via replace")
+		{"TC39_no_exchange_replace", func(t *testing.T) {
+			if wantsBuy(norm("replace my car")) {
+				t.Fatal("replace should not be buy")
 			}
 		}},
 		{"TC40_switch_buy_to_sell", func(t *testing.T) {
@@ -247,9 +247,9 @@ func TestHundred(t *testing.T) {
 				t.Fatal("BUY->SELL switch not detected")
 			}
 		}},
-		{"TC41_switch_buy_to_exchange", func(t *testing.T) {
-			if detectIntentSwitch("i want exchange", "BUY") != "EXCHANGE" {
-				t.Fatal("BUY->EXCHANGE switch not detected")
+		{"TC41_switch_no_exchange", func(t *testing.T) {
+			if detectIntentSwitch("i want exchange", "BUY") != "" {
+				t.Fatal("BUY->EXCHANGE switch must not exist")
 			}
 		}},
 		{"TC42_switch_no_false_on_fuel", func(t *testing.T) {
@@ -297,9 +297,9 @@ func TestHundred(t *testing.T) {
 				t.Fatalf("got %s", ns)
 			}
 		}},
-		{"TC50_ask_exchange", func(t *testing.T) {
+		{"TC50_ask_exchange_rejected", func(t *testing.T) {
 			ns, _, intent, _, _ := run("ASK_INTENT", "exchange my car", nil)
-			if ns != "EXCHANGE_CURRENT" || intent != "EXCHANGE" {
+			if ns != "ASK_INTENT" || intent != "" {
 				t.Fatalf("got %s %s", ns, intent)
 			}
 		}},
@@ -592,16 +592,16 @@ func TestHundred(t *testing.T) {
 				t.Fatalf("got %s %s %+v", ns, status, patch)
 			}
 		}},
-		{"TC96_exchange_current", func(t *testing.T) {
-			ns, _, _, _, patch := run("EXCHANGE_CURRENT", "Alto 2016, 60000km", withData())
-			if ns != "EXCHANGE_WANT" || patch["exchange_current"] == "" {
-				t.Fatalf("got %s %+v", ns, patch)
+		{"TC96_exchange_input_in_sell", func(t *testing.T) {
+			ns, _, _, _, _ := run("SELL_CAR", "Swift 2018", withData())
+			if ns != "SELL_DETAILS" {
+				t.Fatalf("got %s", ns)
 			}
 		}},
-		{"TC97_exchange_want_done", func(t *testing.T) {
-			ns, _, _, status, _ := run("EXCHANGE_WANT", "Creta under RM 200,000", withData())
-			if ns != "DONE" || status != "FOLLOWUP" {
-				t.Fatalf("got %s %s", ns, status)
+		{"TC97_exchange_input_in_buy", func(t *testing.T) {
+			ns, _, _, _, _ := run("BUY_BRAND", "Maruti", withData("budget_max", "500000"))
+			if ns != "BUY_MODEL" {
+				t.Fatalf("got %s", ns)
 			}
 		}},
 		{"TC98_done_buy_restart", func(t *testing.T) {
