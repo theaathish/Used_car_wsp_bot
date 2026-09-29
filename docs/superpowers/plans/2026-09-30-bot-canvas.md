@@ -35,7 +35,7 @@
 **Interfaces:**
 - Produces: `#drawflow` canvas element, view toggle buttons (`btn-bot-view-canvas`, `btn-bot-view-table`), canvas toolbar (`#bot_canvas_toolbar`), inspector drawer (`#bot_canvas_drawer`).
 
-- [ ] **Step 1: Add Drawflow CDN styles and scripts to `index.html`**
+- [x] **Step 1: Add Drawflow CDN styles and scripts to `index.html`**
 
 In `<head>` of `index.html`:
 ```html
@@ -43,7 +43,7 @@ In `<head>` of `index.html`:
 <script src="https://cdn.jsdelivr.net/gh/jerosoler/Drawflow/dist/drawflow.min.js"></script>
 ```
 
-- [ ] **Step 2: Add custom CSS tokens and rules for Drawflow in `index.html`**
+- [x] **Step 2: Add custom CSS tokens and rules for Drawflow in `index.html`**
 
 Add CSS for:
 - Infinite dot-grid background for `#drawflow`
@@ -53,18 +53,18 @@ Add CSS for:
 - SVG connection wires with curved styling and distinct colors for default and conditional links
 - Slide-over inspector drawer (`#bot_canvas_drawer`) positioned on the right of `#drawflow`
 
-- [ ] **Step 3: Add View Toggle, Toolbar, and Canvas DOM into `#s-bot`**
+- [x] **Step 3: Add View Toggle, Toolbar, and Canvas DOM into `#s-bot`**
 
 Replace the static sub-tabs in `<section id="s-bot">` with:
 - Top bar with Flow Selector and View Toggle: `[Canvas View]` and `[Table View]`.
 - `#bot-view-canvas`: contains Toolbar (`+ Add Question`, `Auto-Arrange`, `Zoom In`, `Zoom Out`, `Reset 100%`), `#drawflow` viewport, and `#bot_canvas_drawer`.
 - `#bot-view-table`: wraps the existing tabular flows, questions, conditions, and system responses sections.
 
-- [ ] **Step 4: Verify HTML structure and syntax**
+- [x] **Step 4: Verify HTML structure and syntax**
 
 Run: `node -c web/dist/app.js` and verify `index.html` renders cleanly without layout disruption.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/dist/index.html
@@ -82,20 +82,20 @@ git commit -m "feat(canvas): add Drawflow assets and bot canvas DOM scaffolding"
 - Consumes: Drawflow global library (`window.Drawflow`), `/api/bot/flows/:id/questions`
 - Produces: `initDrawflow()`, `renderBotCanvas(flowId)`, `autoArrangeCanvas()`, zoom/pan controls
 
-- [ ] **Step 1: Implement `initDrawflow()`**
+- [x] **Step 1: Implement `initDrawflow()`**
 
 Create and configure the `Drawflow` instance attached to `document.getElementById('drawflow')`:
 - Set `editor.reroute = true` for curved wires.
 - Attach zoom level limits (`0.4` to `1.8`).
 - Register custom event listeners.
 
-- [ ] **Step 2: Implement auto-layout coordinate calculation**
+- [x] **Step 2: Implement auto-layout coordinate calculation**
 
 Calculate `(x, y)` positions for questions:
 - Start root question at `(100, 200)`.
 - Step horizontally with `dx = 320` and vertical offsets for branched questions.
 
-- [ ] **Step 3: Implement `renderBotCanvas(flowId)`**
+- [x] **Step 3: Implement `renderBotCanvas(flowId)`**
 
 - Clear existing Drawflow module.
 - Fetch flow questions via `api('GET', '/api/bot/flows/' + flowId + '/questions')`.
@@ -106,17 +106,17 @@ Calculate `(x, y)` positions for questions:
 - Add node to editor using `editor.addNode()`.
 - Map Drawflow internal node IDs to `bot_questions.id`.
 
-- [ ] **Step 4: Implement toolbar actions**
+- [x] **Step 4: Implement toolbar actions**
 
 - `zoomIn()` / `zoomOut()` / `zoomReset()`
 - `autoArrangeCanvas()`: recalculates positions and repositions nodes.
 - View switcher: toggles between `#bot-view-canvas` and `#bot-view-table`.
 
-- [ ] **Step 5: Verify canvas rendering**
+- [x] **Step 5: Verify canvas rendering**
 
 Run: `node -c web/dist/app.js`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/dist/app.js
@@ -134,14 +134,14 @@ git commit -m "feat(canvas): initialize Drawflow and implement auto-layout node 
 - Consumes: Drawflow events `connectionCreated`, `connectionRemoved`, `/api/bot/questions/:id`
 - Produces: Automatic persistence of transitions when wires are drawn or removed
 
-- [ ] **Step 1: Render existing transitions as canvas wires**
+- [x] **Step 1: Render existing transitions as canvas wires**
 
 In `renderBotCanvas(flowId)`:
 - After all nodes are mounted, iterate over questions.
 - If `q.next_question_id` is set, call `editor.addConnection(sourceNodeId, targetNodeId, 'output_1', 'input_1')`.
 - If conditions point to `target_question_id`, connect the corresponding condition output socket to the target input socket.
 
-- [ ] **Step 2: Handle `connectionCreated` event**
+- [x] **Step 2: Handle `connectionCreated` event**
 
 When user drags a wire between two sockets:
 - Identify source question UUID and target question UUID.
@@ -151,7 +151,7 @@ When user drags a wire between two sockets:
 - If origin is a condition socket:
   - Update condition's `target_question_id` via `/api/bot/conditions/:id`.
 
-- [ ] **Step 3: Handle `connectionRemoved` event**
+- [x] **Step 3: Handle `connectionRemoved` event**
 
 When user deletes a wire:
 - If origin was default output socket:
@@ -160,11 +160,11 @@ When user deletes a wire:
 - If origin was a condition socket:
   - Update condition to remove `target_question_id`.
 
-- [ ] **Step 4: Verify connection persistence**
+- [x] **Step 4: Verify connection persistence**
 
 Verify that drawing and removing connections correctly update database state and survive canvas reloads.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/dist/app.js
@@ -183,7 +183,7 @@ git commit -m "feat(canvas): wire connections between nodes with live API persis
 - Consumes: Drawflow `nodeSelected`, `nodeUnselected`
 - Produces: `openCanvasDrawer(questionId)`, `saveCanvasDrawer()`, `addCanvasQuestion()`, `deleteCanvasQuestion()`
 
-- [ ] **Step 1: Implement `nodeSelected` handler & drawer opening**
+- [x] **Step 1: Implement `nodeSelected` handler & drawer opening**
 
 When user clicks a node on canvas:
 - Fetch full question data and associated conditions.
@@ -191,21 +191,21 @@ When user clicks a node on canvas:
 - Slide open `#bot_canvas_drawer`.
 - Highlight selected node.
 
-- [ ] **Step 2: Implement drawer Save action**
+- [x] **Step 2: Implement drawer Save action**
 
 When user edits fields in drawer and clicks `Save Changes`:
 - Call `api('PUT', '/api/bot/questions/' + id, payload)`.
 - Update the node's visual title, field name, type badge, and text snippet on the canvas directly without full reload.
 - Toast `"Question updated"`.
 
-- [ ] **Step 3: Implement Quick `+ Add Question` on Canvas**
+- [x] **Step 3: Implement Quick `+ Add Question` on Canvas**
 
 When user clicks `+ Add Question` on the canvas toolbar:
 - Compute optimal `(x, y)` location near the last node.
 - Create question via `api('POST', '/api/bot/flows/' + flowId + '/questions', defaultPayload)`.
 - Add new node directly to Drawflow canvas and open the inspector drawer immediately for editing.
 
-- [ ] **Step 4: Implement Delete Question from Canvas**
+- [x] **Step 4: Implement Delete Question from Canvas**
 
 In inspector drawer, provide `Delete Question`:
 - Confirm prompt.
@@ -213,11 +213,11 @@ In inspector drawer, provide `Delete Question`:
 - Remove node from Drawflow editor via `editor.removeNodeId('node-' + nodeId)`.
 - Close drawer and toast `"Question deleted"`.
 
-- [ ] **Step 5: Verify Drawer & CRUD functionality**
+- [x] **Step 5: Verify Drawer & CRUD functionality**
 
 Verify creating a question, editing properties, and deleting questions directly through the canvas.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/dist/index.html web/dist/app.js
@@ -236,12 +236,12 @@ git commit -m "feat(canvas): add inspector drawer and interactive node CRUD"
 - Consumes: Full admin stack, Go backend
 - Produces: Verified, production-ready node canvas editor on Railway
 
-- [ ] **Step 1: Test canvas toggle & responsive resize**
+- [x] **Step 1: Test canvas toggle & responsive resize**
 
 - Switch from Table View to Canvas View: verify canvas calculates bounding box and renders correctly without graphical clipping.
 - Test zoom/pan and auto-arrange with 7+ nodes (Buy a Car flow).
 
-- [ ] **Step 2: Run backend tests and frontend syntax validation**
+- [x] **Step 2: Run backend tests and frontend syntax validation**
 
 ```bash
 node -c web/dist/app.js
@@ -250,7 +250,7 @@ go build ./cmd/server
 ```
 Expected: All pass with 0 errors.
 
-- [ ] **Step 3: Commit and Push to `origin main`**
+- [x] **Step 3: Commit and Push to `origin main`**
 
 ```bash
 git add -A
