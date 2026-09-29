@@ -35,7 +35,7 @@ function fmtMoney(n) {
 }
 const PILLMAP = {AVAILABLE: 'green', DELIVERED: 'green', COMPLETED: 'green', CONVERTED: 'green', INTERESTED: 'green', SENT: 'green', RECEIVED: 'green',
   RESERVED: 'amber', PENDING: 'amber', VALUATION_PENDING: 'amber', THINKING: 'amber', FOLLOWUP: 'amber', TEST_DRIVE: 'amber', SCHEDULED: 'amber', PARTIAL: 'amber',
-  BOOKED: 'blue', CONFIRMED: 'blue', NEW: 'blue', CONTACTED: 'blue', QUALIFIED: 'blue', BUY: 'blue', SELL: 'blue', EXCHANGE: 'blue',
+  BOOKED: 'blue', CONFIRMED: 'blue', NEW: 'blue', CONTACTED: 'blue', QUALIFIED: 'blue', BUY: 'blue', SELL: 'blue',
   SOLD: 'gray', LOST: 'gray', NOT_INTERESTED: 'gray', CANCELLED: 'gray', DONE: 'gray', REFUNDED: 'gray', NO_SHOW: 'gray', FAILED_PERMANENTLY: 'red', FAILED: 'red'};
 function pill(v) {
   v = v || '—';
