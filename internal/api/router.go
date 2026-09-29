@@ -278,25 +278,27 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.createBotFlow(w, r)
 	case strings.HasPrefix(p, "/api/bot/flows/") && strings.HasSuffix(p, "/questions") && r.Method == "GET":
 		s.listBotQuestions(w, r)
-	case strings.HasPrefix(p, "/api/bot/flows/") && r.Method == "PATCH":
+	case (p == "/api/bot/questions" || (strings.HasPrefix(p, "/api/bot/flows/") && strings.HasSuffix(p, "/questions"))) && r.Method == "POST":
+		s.createBotQuestion(w, r)
+	case strings.HasPrefix(p, "/api/bot/flows/") && (r.Method == "PATCH" || r.Method == "PUT"):
 		s.patchBotFlow(w, r)
 	case strings.HasPrefix(p, "/api/bot/flows/") && r.Method == "DELETE":
 		s.deleteBotFlow(w, r)
-	case p == "/api/bot/questions" && r.Method == "POST":
-		s.createBotQuestion(w, r)
-	case strings.HasPrefix(p, "/api/bot/questions/") && r.Method == "PATCH":
+	case strings.HasPrefix(p, "/api/bot/questions/") && (r.Method == "PATCH" || r.Method == "PUT"):
 		s.patchBotQuestion(w, r)
 	case strings.HasPrefix(p, "/api/bot/questions/") && r.Method == "DELETE":
 		s.deleteBotQuestion(w, r)
-	case strings.HasPrefix(p, "/api/bot/conditions/") && r.Method == "GET":
+	case (strings.HasPrefix(p, "/api/bot/conditions/") || (strings.HasPrefix(p, "/api/bot/questions/") && strings.HasSuffix(p, "/conditions"))) && r.Method == "GET":
 		s.listBotConditions(w, r)
-	case p == "/api/bot/conditions" && r.Method == "POST":
+	case (p == "/api/bot/conditions" || (strings.HasPrefix(p, "/api/bot/questions/") && strings.HasSuffix(p, "/conditions"))) && r.Method == "POST":
 		s.createBotCondition(w, r)
+	case strings.HasPrefix(p, "/api/bot/conditions/") && (r.Method == "PATCH" || r.Method == "PUT"):
+		s.patchBotCondition(w, r)
 	case strings.HasPrefix(p, "/api/bot/conditions/") && r.Method == "DELETE":
 		s.deleteBotCondition(w, r)
 	case p == "/api/bot/responses" && r.Method == "GET":
 		s.listBotResponses(w, r)
-	case strings.HasPrefix(p, "/api/bot/responses/") && r.Method == "PATCH":
+	case strings.HasPrefix(p, "/api/bot/responses/") && (r.Method == "PATCH" || r.Method == "PUT"):
 		s.patchBotResponse(w, r)
 	case p == "/api/whatsapp/status" && r.Method == "GET":
 		writeJSON(w, s.WA.Status())

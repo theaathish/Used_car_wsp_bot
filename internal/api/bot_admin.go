@@ -254,6 +254,9 @@ func (s *Server) createBotQuestion(w http.ResponseWriter, r *http.Request) {
 		OrderIndex     int      `json:"order_index"`
 		IsActive       *bool    `json:"is_active"`
 	}
+	if in.FlowID == "" && strings.HasPrefix(r.URL.Path, "/api/bot/flows/") {
+		in.FlowID = idParam(r, "/api/bot/flows/")
+	}
 	if err := readJSON(r, &in); err != nil || in.FlowID == "" || strings.TrimSpace(in.QuestionText) == "" {
 		http.Error(w, `{"error":"flow_id and question_text required"}`, http.StatusBadRequest)
 		return
@@ -381,6 +384,9 @@ func (s *Server) deleteBotQuestion(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listBotConditions(w http.ResponseWriter, r *http.Request) {
 	qID := idParam(r, "/api/bot/conditions/")
+	if qID == "" && strings.HasPrefix(r.URL.Path, "/api/bot/questions/") {
+		qID = idParam(r, "/api/bot/questions/")
+	}
 	if badUUID(w, qID) {
 		return
 	}
@@ -427,20 +433,38 @@ func (s *Server) createBotCondition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		QuestionID       string  `json:"question_id"`
-		FieldName        string  `json:"field_name"`
-		Operator         string  `json:"operator"`
-		Value            string  `json:"value"`
-		TargetQuestionID *string `json:"target_question_id"`
-		TargetFlowID     *string `json:"target_flow_id"`
-		Priority         int     `json:"priority"`
+		QuestionID        string  `json:"question_id"`
+		FieldName         string  `json:"field_name"`
+		Operator          string  `json:"operator"`
+		ConditionOperator string  `json:"condition_operator"`
+		Value             string  `json:"value"`
+		ConditionValue    string  `json:"condition_value"`
+		TargetQuestionID  *string `json:"target_question_id"`
+		TargetFlowID      *string `json:"target_flow_id"`
+		Priority          int     `json:"priority"`
 	}
-	if err := readJSON(r, &in); err != nil || in.QuestionID == "" {
+	if err := readJSON(r, &in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	if in.QuestionID == "" && strings.HasPrefix(r.URL.Path, "/api/bot/questions/") {
+		in.QuestionID = idParam(r, "/api/bot/questions/")
+	}
+	if in.QuestionID == "" {
 		http.Error(w, `{"error":"question_id required"}`, http.StatusBadRequest)
 		return
 	}
+	if in.Operator == "" && in.ConditionOperator != "" {
+		in.Operator = in.ConditionOperator
+	}
 	if in.Operator == "" {
 		in.Operator = "EQUALS"
+	}
+	if in.Value == "" && in.ConditionValue != "" {
+		in.Value = in.ConditionValue
+	}
+	if in.FieldName == "" {
+		_ = s.Pool.QueryRow(r.Context(), `SELECT field_name FROM bot_questions WHERE id=$1`, in.QuestionID).Scan(&in.FieldName)
 	}
 	var targetQ, targetF *string
 	if in.TargetQuestionID != nil && strings.TrimSpace(*in.TargetQuestionID) != "" {
@@ -461,6 +485,62 @@ func (s *Server) createBotCondition(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"id": id, "question_id": in.QuestionID})
+}
+
+func (s *Server) patchBotCondition(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
+	id := idParam(r, "/api/bot/conditions/")
+	if badUUID(w, id) {
+		return
+	}
+	var in struct {
+		TargetQuestionID  *string `json:"target_question_id"`
+		TargetFlowID      *string `json:"target_flow_id"`
+		Operator          *string `json:"operator"`
+		ConditionOperator *string `json:"condition_operator"`
+		Value             *string `json:"value"`
+		ConditionValue    *string `json:"condition_value"`
+		Priority          *int    `json:"priority"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	if in.TargetQuestionID != nil {
+		if *in.TargetQuestionID == "" {
+			_, _ = s.Pool.Exec(ctx, `UPDATE bot_conditions SET target_question_id=NULL WHERE id=$1`, id)
+		} else {
+			_, _ = s.Pool.Exec(ctx, `UPDATE bot_conditions SET target_question_id=$1 WHERE id=$2`, *in.TargetQuestionID, id)
+		}
+	}
+	if in.TargetFlowID != nil {
+		if *in.TargetFlowID == "" {
+			_, _ = s.Pool.Exec(ctx, `UPDATE bot_conditions SET target_flow_id=NULL WHERE id=$1`, id)
+		} else {
+			_, _ = s.Pool.Exec(ctx, `UPDATE bot_conditions SET target_flow_id=$1 WHERE id=$2`, *in.TargetFlowID, id)
+		}
+	}
+	op := in.Operator
+	if op == nil {
+		op = in.ConditionOperator
+	}
+	if op != nil && strings.TrimSpace(*op) != "" {
+		_, _ = s.Pool.Exec(ctx, `UPDATE bot_conditions SET operator=$1 WHERE id=$2`, strings.ToUpper(strings.TrimSpace(*op)), id)
+	}
+	val := in.Value
+	if val == nil {
+		val = in.ConditionValue
+	}
+	if val != nil {
+		_, _ = s.Pool.Exec(ctx, `UPDATE bot_conditions SET value=$1 WHERE id=$2`, *val, id)
+	}
+	if in.Priority != nil {
+		_, _ = s.Pool.Exec(ctx, `UPDATE bot_conditions SET priority=$1 WHERE id=$2`, *in.Priority, id)
+	}
+	writeJSON(w, map[string]any{"ok": true, "id": id})
 }
 
 func (s *Server) deleteBotCondition(w http.ResponseWriter, r *http.Request) {

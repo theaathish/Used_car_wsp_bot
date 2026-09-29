@@ -137,6 +137,14 @@ func TestBotAdmin_CRUD(t *testing.T) {
 		t.Fatalf("list conditions code = %d", rec.Code)
 	}
 
+	// 7b. Patch Condition
+	rec = doReq("PATCH", "/api/bot/conditions/"+condID, map[string]any{
+		"value": "60000",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch condition code = %d", rec.Code)
+	}
+
 	// 8. Delete Condition
 	rec = doReq("DELETE", "/api/bot/conditions/"+condID, nil)
 	if rec.Code != http.StatusOK {

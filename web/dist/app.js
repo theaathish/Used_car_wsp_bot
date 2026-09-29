@@ -69,7 +69,14 @@ function show(k) {
   document.querySelectorAll('#nav button').forEach(function (b) { b.classList.remove('on'); });
   const nb = document.getElementById('nav-' + k); if (nb) nb.classList.add('on');
   if (k === 'conv' && curConv) openConv(curConv);
-  if (k === 'bot') loadBotFlows();
+  if (k === 'bot') {
+    if (currentBotView === 'canvas') {
+      initDrawflowIfNeeded();
+      loadCanvasFlowsDropdown();
+    } else {
+      loadBotFlows();
+    }
+  }
 }
 
 /* ---------- boot ---------- */
@@ -643,6 +650,493 @@ let BOT_QUESTIONS = [];
 let curBotFlowId = '';
 let curBotQuestionId = '';
 
+/* Bot Canvas State */
+let dfEditor = null;
+let currentBotView = 'canvas';
+let dfIdToQId = {};
+let qIdToDfId = {};
+let isRenderingCanvas = false;
+let curCanvasQuestionId = null;
+let curCanvasConditions = [];
+let questionConditionsMap = {};
+
+function setBotView(mode) {
+  currentBotView = mode;
+  const btnCanvas = document.getElementById('btn-view-canvas');
+  const btnTable = document.getElementById('btn-view-table');
+  const viewCanvas = document.getElementById('bot-view-canvas');
+  const viewTable = document.getElementById('bot-view-table');
+
+  if (mode === 'canvas') {
+    if (btnCanvas) btnCanvas.classList.add('on');
+    if (btnTable) btnTable.classList.remove('on');
+    if (viewCanvas) viewCanvas.classList.remove('hidden');
+    if (viewTable) viewTable.classList.add('hidden');
+    initDrawflowIfNeeded();
+    loadCanvasFlowsDropdown();
+  } else {
+    if (btnCanvas) btnCanvas.classList.remove('on');
+    if (btnTable) btnTable.classList.add('on');
+    if (viewCanvas) viewCanvas.classList.add('hidden');
+    if (viewTable) viewTable.classList.remove('hidden');
+    closeCanvasDrawer();
+    loadBotFlows();
+  }
+}
+
+function initDrawflowIfNeeded() {
+  if (dfEditor) return;
+  const container = document.getElementById('drawflow');
+  if (!container || typeof Drawflow === 'undefined') return;
+
+  dfEditor = new Drawflow(container);
+  dfEditor.reroute = true;
+  dfEditor.reroute_fix_curvature = true;
+  dfEditor.curvature = 0.5;
+  dfEditor.zoom_max = 1.8;
+  dfEditor.zoom_min = 0.4;
+  dfEditor.zoom_value = 0.1;
+  dfEditor.start();
+
+  dfEditor.on('nodeSelected', function(id) {
+    onCanvasNodeSelected(id);
+  });
+
+  dfEditor.on('connectionCreated', function(info) {
+    onCanvasConnectionCreated(info);
+  });
+
+  dfEditor.on('connectionRemoved', function(info) {
+    onCanvasConnectionRemoved(info);
+  });
+}
+
+function canvasZoomIn() {
+  if (dfEditor) dfEditor.zoom_in();
+}
+function canvasZoomOut() {
+  if (dfEditor) dfEditor.zoom_out();
+}
+function canvasZoomReset() {
+  if (dfEditor) dfEditor.zoom_reset();
+}
+function autoArrangeCanvas() {
+  if (!curBotFlowId) return;
+  renderBotCanvas(curBotFlowId, true);
+}
+
+async function loadCanvasFlowsDropdown() {
+  if (!BOT_FLOWS.length) {
+    const r = await api('GET', '/api/bot/flows');
+    if (r.ok) BOT_FLOWS = r.data || [];
+  }
+  const sel = document.getElementById('canvas_flow_select');
+  if (!sel) return;
+  let opts = BOT_FLOWS.map(function(f) {
+    return '<option value="' + esc(f.id) + '">' + esc(f.name) + (f.is_entry_flow ? ' (Entry)' : '') + '</option>';
+  }).join('');
+  sel.innerHTML = opts || '<option value="">No flows exist</option>';
+
+  if (!curBotFlowId && BOT_FLOWS.length) {
+    curBotFlowId = BOT_FLOWS[0].id;
+  }
+  if (curBotFlowId) {
+    sel.value = curBotFlowId;
+    renderBotCanvas(curBotFlowId);
+  }
+}
+
+function onCanvasFlowChange(flowId) {
+  curBotFlowId = flowId;
+  closeCanvasDrawer();
+  const tableSel = document.getElementById('bq_flow_select');
+  if (tableSel) tableSel.value = flowId;
+  renderBotCanvas(flowId);
+}
+
+function loadCanvasCurrentFlow() {
+  if (curBotFlowId) renderBotCanvas(curBotFlowId);
+}
+
+async function renderBotCanvas(flowId, autoArrange) {
+  if (!flowId) return;
+  initDrawflowIfNeeded();
+  if (!dfEditor) return;
+
+  isRenderingCanvas = true;
+  closeCanvasDrawer();
+  dfEditor.clear();
+  dfIdToQId = {};
+  qIdToDfId = {};
+
+  const r = await api('GET', '/api/bot/flows/' + flowId + '/questions');
+  if (!r.ok) {
+    isRenderingCanvas = false;
+    return;
+  }
+  BOT_QUESTIONS = r.data || [];
+
+  if (!BOT_QUESTIONS.length) {
+    isRenderingCanvas = false;
+    return;
+  }
+
+  // Fetch conditions for all questions in this flow
+  const condPromises = BOT_QUESTIONS.map(function(q) {
+    return api('GET', '/api/bot/conditions/' + q.id);
+  });
+  const condResults = await Promise.all(condPromises);
+  questionConditionsMap = {};
+  BOT_QUESTIONS.forEach(function(q, idx) {
+    questionConditionsMap[q.id] = (condResults[idx] && condResults[idx].ok && condResults[idx].data) || [];
+  });
+
+  // Calculate layout coordinates and mount nodes
+  BOT_QUESTIONS.forEach(function(q, i) {
+    const conds = questionConditionsMap[q.id] || [];
+    const cols = 4;
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const x = 60 + col * 320;
+    const y = 80 + row * 240;
+
+    let typePillClass = 'p-gray';
+    if (q.question_type === 'number') typePillClass = 'p-blue';
+    else if (q.question_type === 'select') typePillClass = 'p-amber';
+    else if (q.question_type === 'phone' || q.question_type === 'email') typePillClass = 'p-green';
+
+    const condPills = conds.length ? '<span class="pill p-amber" style="font-size:9px">' + conds.length + ' branch' + (conds.length > 1 ? 'es' : '') + '</span>' : '';
+
+    const nodeHtml = '<div class="df-node-content">' +
+      '<div class="df-node-header">' +
+        '<span class="df-node-field">#' + q.order_index + ' ' + esc(q.field_name) + '</span>' +
+        '<div class="row" style="margin:0;gap:4px">' + condPills + '<span class="pill ' + typePillClass + '" style="font-size:9px">' + esc(q.question_type) + '</span></div>' +
+      '</div>' +
+      '<div class="df-node-text" title="' + esc(q.question_text) + '">' + esc(q.question_text) + '</div>' +
+      '<div class="df-node-ports-label">' +
+        '<span>● in</span>' +
+        '<span>' + (conds.length ? 'rules ⤳ ' : '') + 'next ●</span>' +
+      '</div>' +
+    '</div>';
+
+    const outputsCount = 1 + conds.length;
+    const dfId = dfEditor.addNode(
+      'question',
+      1,
+      outputsCount,
+      x,
+      y,
+      'question-node',
+      { questionId: q.id },
+      nodeHtml
+    );
+
+    dfIdToQId[dfId] = q.id;
+    qIdToDfId[q.id] = dfId;
+  });
+
+  // Wire connections between nodes
+  BOT_QUESTIONS.forEach(function(q) {
+    const srcDfId = qIdToDfId[q.id];
+    if (!srcDfId) return;
+
+    // 1. Default sequential wire (output_1 -> input_1)
+    if (q.next_question_id && qIdToDfId[q.next_question_id]) {
+      const tgtDfId = qIdToDfId[q.next_question_id];
+      try {
+        dfEditor.addConnection(srcDfId, tgtDfId, 'output_1', 'input_1');
+      } catch (e) {
+        console.warn('Could not add default connection:', e);
+      }
+    }
+
+    // 2. Conditional branch wires (output_2, output_3... -> input_1)
+    const conds = questionConditionsMap[q.id] || [];
+    conds.forEach(function(c, cIdx) {
+      if (c.target_question_id && qIdToDfId[c.target_question_id]) {
+        const tgtDfId = qIdToDfId[c.target_question_id];
+        const outPort = 'output_' + (cIdx + 2);
+        try {
+          dfEditor.addConnection(srcDfId, tgtDfId, outPort, 'input_1');
+        } catch (e) {
+          console.warn('Could not add condition connection:', e);
+        }
+      }
+    });
+  });
+
+  isRenderingCanvas = false;
+}
+
+async function onCanvasConnectionCreated(info) {
+  if (isRenderingCanvas) return;
+  const srcQId = dfIdToQId[info.output_id];
+  const tgtQId = dfIdToQId[info.input_id];
+  if (!srcQId || !tgtQId) return;
+
+  if (info.output_class === 'output_1') {
+    const r = await api('PATCH', '/api/bot/questions/' + srcQId, { next_question_id: tgtQId });
+    if (r.ok) {
+      const q = BOT_QUESTIONS.find(function(x) { return x.id === srcQId; });
+      if (q) q.next_question_id = tgtQId;
+      if (curCanvasQuestionId === srcQId) {
+        const nextSel = document.getElementById('cd_next');
+        if (nextSel) nextSel.value = tgtQId;
+      }
+      toast('Connected: Next question updated');
+    }
+  } else if (info.output_class && info.output_class.startsWith('output_')) {
+    const condIndex = parseInt(info.output_class.slice(7), 10) - 2;
+    const conds = questionConditionsMap[srcQId] || [];
+    if (conds[condIndex]) {
+      const cond = conds[condIndex];
+      cond.target_question_id = tgtQId;
+      const r = await api('PATCH', '/api/bot/conditions/' + cond.id, { target_question_id: tgtQId });
+      if (r.ok) {
+        toast('Branch rule connected');
+        if (curCanvasQuestionId === srcQId) loadCanvasConditions(srcQId);
+      }
+    }
+  }
+}
+
+async function onCanvasConnectionRemoved(info) {
+  if (isRenderingCanvas) return;
+  const srcQId = dfIdToQId[info.output_id];
+  if (!srcQId) return;
+
+  if (info.output_class === 'output_1') {
+    const r = await api('PATCH', '/api/bot/questions/' + srcQId, { next_question_id: '' });
+    if (r.ok) {
+      const q = BOT_QUESTIONS.find(function(x) { return x.id === srcQId; });
+      if (q) q.next_question_id = null;
+      if (curCanvasQuestionId === srcQId) {
+        const nextSel = document.getElementById('cd_next');
+        if (nextSel) nextSel.value = '';
+      }
+      toast('Connection removed');
+    }
+  } else if (info.output_class && info.output_class.startsWith('output_')) {
+    const condIndex = parseInt(info.output_class.slice(7), 10) - 2;
+    const conds = questionConditionsMap[srcQId] || [];
+    if (conds[condIndex]) {
+      const cond = conds[condIndex];
+      cond.target_question_id = null;
+      const r = await api('PATCH', '/api/bot/conditions/' + cond.id, { target_question_id: '' });
+      if (r.ok) {
+        toast('Branch target cleared');
+        if (curCanvasQuestionId === srcQId) loadCanvasConditions(srcQId);
+      }
+    }
+  }
+}
+
+function onCanvasNodeSelected(dfNodeId) {
+  const qId = dfIdToQId[dfNodeId];
+  if (qId) openCanvasDrawer(qId);
+}
+
+function openCanvasDrawer(qId) {
+  curCanvasQuestionId = qId;
+  const q = BOT_QUESTIONS.find(function(x) { return x.id === qId; });
+  if (!q) return;
+
+  document.getElementById('cd_id').value = q.id;
+  document.getElementById('cd_field').value = q.field_name || '';
+  document.getElementById('cd_text').value = q.question_text || '';
+  document.getElementById('cd_type').value = q.question_type || 'text';
+  document.getElementById('cd_order').value = q.order_index != null ? q.order_index : 0;
+  document.getElementById('cd_validation').value = q.validation_rule || '';
+  document.getElementById('cd_error').value = q.error_message || '';
+  document.getElementById('cd_req').checked = !!q.is_required;
+
+  onCanvasDrawerTypeChange(q.question_type);
+
+  if (q.allowed_values) {
+    if (Array.isArray(q.allowed_values)) {
+      document.getElementById('cd_allowed').value = q.allowed_values.join('\n');
+    } else {
+      try {
+        const arr = JSON.parse(q.allowed_values);
+        document.getElementById('cd_allowed').value = Array.isArray(arr) ? arr.join('\n') : q.allowed_values;
+      } catch (e) {
+        document.getElementById('cd_allowed').value = q.allowed_values;
+      }
+    }
+  } else {
+    document.getElementById('cd_allowed').value = '';
+  }
+
+  // Populate next step options
+  const nextSel = document.getElementById('cd_next');
+  let nextOpts = '<option value="">Sequential (by order #)</option>';
+  BOT_QUESTIONS.forEach(function(item) {
+    if (item.id !== q.id) {
+      nextOpts += '<option value="' + esc(item.id) + '">#' + item.order_index + ' ' + esc(item.field_name) + ' (' + esc(item.question_text.slice(0, 20)) + ')</option>';
+    }
+  });
+  nextSel.innerHTML = nextOpts;
+  nextSel.value = q.next_question_id || '';
+
+  // Populate condition target question options
+  const condTargetSel = document.getElementById('cd_c_target_q');
+  let condTargetOpts = '<option value="">Jump to Question…</option>';
+  BOT_QUESTIONS.forEach(function(item) {
+    if (item.id !== q.id) {
+      condTargetOpts += '<option value="' + esc(item.id) + '">#' + item.order_index + ' ' + esc(item.field_name) + '</option>';
+    }
+  });
+  condTargetSel.innerHTML = condTargetOpts;
+
+  document.getElementById('cd_title').textContent = 'Edit Question (' + esc(q.field_name) + ')';
+  loadCanvasConditions(q.id);
+
+  document.getElementById('bot_canvas_drawer').classList.remove('closed');
+}
+
+function closeCanvasDrawer() {
+  const drawer = document.getElementById('bot_canvas_drawer');
+  if (drawer) drawer.classList.add('closed');
+  curCanvasQuestionId = null;
+}
+
+function onCanvasDrawerTypeChange(type) {
+  const wrap = document.getElementById('cd_allowed_wrap');
+  if (type === 'select') wrap.classList.remove('hidden');
+  else wrap.classList.add('hidden');
+}
+
+async function saveCanvasDrawer() {
+  if (!curCanvasQuestionId) return;
+  const text = val('cd_text');
+  const field = val('cd_field');
+  const type = val('cd_type');
+  const order = parseInt(val('cd_order'), 10) || 0;
+  const validation = val('cd_validation');
+  const error = val('cd_error');
+  const nextId = val('cd_next') || null;
+  const req = document.getElementById('cd_req').checked;
+
+  if (!text) { toast('Question text required', 'err'); return; }
+  if (!field) { toast('Field name required', 'err'); return; }
+
+  let allowed = [];
+  if (type === 'select') {
+    allowed = val('cd_allowed').split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+    if (!allowed.length) { toast('Select type requires at least one allowed value', 'err'); return; }
+  }
+
+  const payload = {
+    question_text: text,
+    field_name: field,
+    question_type: type,
+    order_index: order,
+    validation_rule: validation,
+    error_message: error,
+    next_question_id: nextId,
+    is_required: req,
+    allowed_values: allowed
+  };
+
+  const r = await api('PATCH', '/api/bot/questions/' + curCanvasQuestionId, payload);
+  if (r.ok) {
+    toast('Question updated');
+    const curQ = curCanvasQuestionId;
+    await renderBotCanvas(curBotFlowId);
+    openCanvasDrawer(curQ);
+  }
+}
+
+async function quickAddQuestionNode() {
+  if (!curBotFlowId) { toast('Select an active flow first', 'err'); return; }
+  const nextOrder = (BOT_QUESTIONS.length + 1) * 10;
+  const fieldName = 'q_' + (BOT_QUESTIONS.length + 1);
+  const payload = {
+    flow_id: curBotFlowId,
+    field_name: fieldName,
+    question_text: 'Please answer the following:',
+    question_type: 'text',
+    order_index: nextOrder,
+    is_required: true,
+    allowed_values: []
+  };
+  const r = await api('POST', '/api/bot/questions', payload);
+  if (r.ok) {
+    toast('Question added');
+    await renderBotCanvas(curBotFlowId);
+    if (r.data && r.data.id) openCanvasDrawer(r.data.id);
+  }
+}
+
+async function deleteCanvasQuestion() {
+  if (!curCanvasQuestionId) return;
+  if (!confirm('Are you sure you want to delete this question and all its connections?')) return;
+  const r = await api('DELETE', '/api/bot/questions/' + curCanvasQuestionId);
+  if (r.ok) {
+    toast('Question deleted');
+    closeCanvasDrawer();
+    renderBotCanvas(curBotFlowId);
+  }
+}
+
+async function loadCanvasConditions(qId) {
+  const r = await api('GET', '/api/bot/conditions/' + qId);
+  curCanvasConditions = (r.ok && r.data) || [];
+  questionConditionsMap[qId] = curCanvasConditions;
+  const el = document.getElementById('cd_conditions_list');
+  if (!curCanvasConditions.length) {
+    el.innerHTML = '<div class="empty" style="padding:8px;font-size:11px">No branching conditions for this question.</div>';
+    return;
+  }
+  let h = '';
+  curCanvasConditions.forEach(function(c) {
+    let targetName = 'Sequential';
+    if (c.target_question_id) {
+      const tq = BOT_QUESTIONS.find(function(x) { return x.id === c.target_question_id; });
+      targetName = tq ? '#' + tq.order_index + ' ' + tq.field_name : sid(c.target_question_id);
+    }
+    h += '<div class="row" style="margin:4px 0;background:#f8fafc;padding:6px 8px;border-radius:6px;border:1px solid var(--line);justify-content:space-between;align-items:center;font-size:11px">';
+    h += '<div><code>' + esc(c.operator) + '</code> <b>"' + esc(c.value) + '"</b> ➔ ' + targetName + '</div>';
+    h += '<button class="small danger" style="padding:2px 6px;margin:0" onclick="deleteCanvasCondition(\'' + esc(c.id) + '\')">✕</button>';
+    h += '</div>';
+  });
+  el.innerHTML = h;
+}
+
+async function addCanvasCondition() {
+  if (!curCanvasQuestionId) return;
+  const op = val('cd_c_op');
+  const value = val('cd_c_val');
+  const targetQ = val('cd_c_target_q') || null;
+
+  if (!value) { toast('Value to match is required', 'err'); return; }
+
+  const payload = {
+    question_id: curCanvasQuestionId,
+    operator: op,
+    value: value,
+    target_question_id: targetQ
+  };
+
+  const r = await api('POST', '/api/bot/conditions', payload);
+  if (r.ok) {
+    toast('Branch rule added');
+    document.getElementById('cd_c_val').value = '';
+    loadCanvasConditions(curCanvasQuestionId);
+    renderBotCanvas(curBotFlowId);
+  }
+}
+
+async function deleteCanvasCondition(condId) {
+  if (!confirm('Delete this condition rule?')) return;
+  const r = await api('DELETE', '/api/bot/conditions/' + condId);
+  if (r.ok) {
+    toast('Condition rule deleted');
+    loadCanvasConditions(curCanvasQuestionId);
+    renderBotCanvas(curBotFlowId);
+  }
+}
+
 function switchBotTab(tab) {
   ['flows', 'questions', 'conditions', 'responses'].forEach(function(t) {
     const el = document.getElementById('bot-tab-' + t);
@@ -666,6 +1160,13 @@ async function loadBotFlows() {
   const r = await api('GET', '/api/bot/flows');
   if (!r.ok) return;
   BOT_FLOWS = r.data || [];
+  const canvasSel = document.getElementById('canvas_flow_select');
+  if (canvasSel && BOT_FLOWS.length) {
+    canvasSel.innerHTML = BOT_FLOWS.map(function(f) {
+      return '<option value="' + esc(f.id) + '">' + esc(f.name) + (f.is_entry_flow ? ' (Entry)' : '') + '</option>';
+    }).join('');
+    if (curBotFlowId) canvasSel.value = curBotFlowId;
+  }
   const el = document.getElementById('bot_flows_list');
   if (!BOT_FLOWS.length) {
     el.innerHTML = '<div class="empty">No flows configured yet. Create one above.</div>';
@@ -741,7 +1242,13 @@ async function deleteBotFlow(id) {
 
 function goToFlowQuestions(flowId) {
   curBotFlowId = flowId;
-  switchBotTab('questions');
+  if (currentBotView === 'canvas') {
+    const sel = document.getElementById('canvas_flow_select');
+    if (sel) sel.value = flowId;
+    renderBotCanvas(flowId);
+  } else {
+    switchBotTab('questions');
+  }
 }
 
 async function loadBotFlowsDropdown() {
