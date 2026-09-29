@@ -58,9 +58,9 @@ function logout() { localStorage.removeItem('token'); location.reload(); }
 /* ---------- nav ---------- */
 const NAV = [['dash', 'Dashboard'], ['guide', 'Guide'], ['wa', 'WhatsApp'], ['cust', 'Customers'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
   ['td', 'Test Drives'], ['insp', 'Inspections'], ['fu', 'Follow-ups'], ['bk', 'Bookings'], ['pay', 'Payments'], ['neg', 'Negotiations'], ['fin', 'Finance'],
-  ['sell', 'Sell Requests'], ['rev', 'Reviews'], ['team', 'Team'], ['set', 'Settings'], ['sim', 'Simulator']];
+  ['sell', 'Sell Requests'], ['rev', 'Reviews'], ['bot', 'Bot Config'], ['team', 'Team'], ['set', 'Settings'], ['sim', 'Simulator']];
 function buildNav() {
-  document.getElementById('nav').innerHTML = NAV.filter(function (n) { return n[0] !== 'team' || ME.role === 'admin'; })
+  document.getElementById('nav').innerHTML = NAV.filter(function (n) { return (n[0] !== 'team' && n[0] !== 'bot') || ME.role === 'admin'; })
     .map(function (n) { return '<button id="nav-' + n[0] + '" onclick="show(\'' + n[0] + '\')"><span class="t">' + n[1] + '</span><span class="n" id="badge-' + n[0] + '"></span></button>'; }).join('');
 }
 function show(k) {
@@ -69,6 +69,7 @@ function show(k) {
   document.querySelectorAll('#nav button').forEach(function (b) { b.classList.remove('on'); });
   const nb = document.getElementById('nav-' + k); if (nb) nb.classList.add('on');
   if (k === 'conv' && curConv) openConv(curConv);
+  if (k === 'bot') loadBotFlows();
 }
 
 /* ---------- boot ---------- */
@@ -634,5 +635,406 @@ async function sellReject(id) {
 async function sellReopen(id) {
   const r = await api('POST', '/api/sell-requests/' + id + '/reopen', {});
   if (r.ok) { toast('Reopened'); loadSELL(); }
+}
+
+/* ---------- bot configuration (admin) ---------- */
+let BOT_FLOWS = [];
+let BOT_QUESTIONS = [];
+let curBotFlowId = '';
+let curBotQuestionId = '';
+
+function switchBotTab(tab) {
+  ['flows', 'questions', 'conditions', 'responses'].forEach(function(t) {
+    const el = document.getElementById('bot-tab-' + t);
+    const btn = document.getElementById('btn-bot-' + t);
+    if (el) {
+      if (t === tab) el.classList.remove('hidden');
+      else el.classList.add('hidden');
+    }
+    if (btn) {
+      if (t === tab) btn.classList.add('primary');
+      else btn.classList.remove('primary');
+    }
+  });
+  if (tab === 'flows') loadBotFlows();
+  else if (tab === 'questions') { loadBotFlowsDropdown(); if (curBotFlowId) loadBotQuestions(curBotFlowId); }
+  else if (tab === 'conditions') { loadBotQuestionsDropdown(); if (curBotQuestionId) loadBotConditions(curBotQuestionId); }
+  else if (tab === 'responses') loadBotResponses();
+}
+
+async function loadBotFlows() {
+  const r = await api('GET', '/api/bot/flows');
+  if (!r.ok) return;
+  BOT_FLOWS = r.data || [];
+  const el = document.getElementById('bot_flows_list');
+  if (!BOT_FLOWS.length) {
+    el.innerHTML = '<div class="empty">No flows configured yet. Create one above.</div>';
+    return;
+  }
+  let h = '<table><thead><tr><th>Name</th><th>Description</th><th>Entry Flow</th><th>Vehicle Match</th><th>Actions</th></tr></thead><tbody>';
+  BOT_FLOWS.forEach(function(f) {
+    h += '<tr><td><b>' + esc(f.name) + '</b></td><td>' + esc(f.description || '—') + '</td>';
+    h += '<td>' + (f.is_entry_flow ? '<span class="pill p-green">YES</span>' : '<span class="pill p-gray">NO</span>') + '</td>';
+    h += '<td>' + (f.trigger_matching ? '<span class="pill p-blue">YES</span>' : '<span class="pill p-gray">NO</span>') + '</td>';
+    h += '<td><div class="row" style="margin:0">';
+    h += '<button class="small" onclick="goToFlowQuestions(\'' + esc(f.id) + '\')">Questions</button>';
+    h += '<button class="small" onclick="editBotFlow(\'' + esc(f.id) + '\')">Edit</button>';
+    h += '<button class="small danger" onclick="deleteBotFlow(\'' + esc(f.id) + '\')">Delete</button>';
+    h += '</div></td></tr>';
+  });
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}
+
+async function addBotFlow() {
+  const name = val('bf_name');
+  const desc = val('bf_desc');
+  const isEntry = document.getElementById('bf_entry').checked;
+  const isMatch = document.getElementById('bf_match').checked;
+  if (!name) { toast('Flow name required', 'err'); return; }
+  const r = await api('POST', '/api/bot/flows', {
+    name: name,
+    description: desc,
+    is_entry_flow: isEntry,
+    trigger_matching: isMatch
+  });
+  if (r.ok) {
+    toast('Flow created');
+    document.getElementById('bf_name').value = '';
+    document.getElementById('bf_desc').value = '';
+    document.getElementById('bf_entry').checked = false;
+    document.getElementById('bf_match').checked = false;
+    loadBotFlows();
+  }
+}
+
+async function editBotFlow(id) {
+  const f = BOT_FLOWS.find(function(x) { return x.id === id; });
+  if (!f) return;
+  const newName = prompt('Flow name:', f.name);
+  if (newName === null || !newName.trim()) return;
+  const newDesc = prompt('Description:', f.description || '');
+  if (newDesc === null) return;
+  const isEntry = confirm('Make this the entry flow? (Only one entry flow can exist)');
+  const isMatch = confirm('Trigger vehicle matching when completed?');
+  const r = await api('PUT', '/api/bot/flows/' + id, {
+    name: newName.trim(),
+    description: newDesc.trim(),
+    is_entry_flow: isEntry,
+    trigger_matching: isMatch
+  });
+  if (r.ok) {
+    toast('Flow updated');
+    loadBotFlows();
+  }
+}
+
+async function deleteBotFlow(id) {
+  if (!confirm('Are you sure you want to delete this flow and ALL associated questions?')) return;
+  const r = await api('DELETE', '/api/bot/flows/' + id);
+  if (r.ok) {
+    toast('Flow deleted');
+    if (curBotFlowId === id) curBotFlowId = '';
+    loadBotFlows();
+  }
+}
+
+function goToFlowQuestions(flowId) {
+  curBotFlowId = flowId;
+  switchBotTab('questions');
+}
+
+async function loadBotFlowsDropdown() {
+  if (!BOT_FLOWS.length) {
+    const r = await api('GET', '/api/bot/flows');
+    if (r.ok) BOT_FLOWS = r.data || [];
+  }
+  const sel = document.getElementById('bq_flow_select');
+  const selTf = document.getElementById('bc_target_f');
+  let opts = BOT_FLOWS.map(function(f) {
+    return '<option value="' + esc(f.id) + '">' + esc(f.name) + (f.is_entry_flow ? ' (Entry)' : '') + '</option>';
+  }).join('');
+  sel.innerHTML = opts || '<option value="">No flows exist</option>';
+  if (selTf) selTf.innerHTML = '<option value="">Or Jump to Flow…</option>' + opts;
+  if (!curBotFlowId && BOT_FLOWS.length) curBotFlowId = BOT_FLOWS[0].id;
+  if (curBotFlowId) sel.value = curBotFlowId;
+}
+
+function onBotFlowSelected(flowId) {
+  curBotFlowId = flowId;
+  cancelEditBotQuestion();
+  loadBotQuestions(flowId);
+}
+
+function onQuestionTypeChange(type) {
+  const wrap = document.getElementById('bq_allowed_wrap');
+  if (type === 'select') wrap.classList.remove('hidden');
+  else wrap.classList.add('hidden');
+}
+
+async function loadBotQuestions(flowId) {
+  if (!flowId) {
+    document.getElementById('bot_questions_list').innerHTML = '<div class="empty">Please select a flow first.</div>';
+    return;
+  }
+  const r = await api('GET', '/api/bot/flows/' + flowId + '/questions');
+  if (!r.ok) return;
+  BOT_QUESTIONS = r.data || [];
+  
+  // Populate next question dropdown
+  const nextSel = document.getElementById('bq_next');
+  let nextOpts = '<option value="">Default Next Question (by order)…</option>';
+  BOT_QUESTIONS.forEach(function(q) {
+    nextOpts += '<option value="' + esc(q.id) + '">#' + q.order_index + ' ' + esc(q.field_name) + ' (' + esc(q.question_text.slice(0, 24)) + ')</option>';
+  });
+  nextSel.innerHTML = nextOpts;
+
+  const el = document.getElementById('bot_questions_list');
+  if (!BOT_QUESTIONS.length) {
+    el.innerHTML = '<div class="empty">No questions configured for this flow yet. Add one above.</div>';
+    return;
+  }
+  let h = '<table><thead><tr><th>#</th><th>Field</th><th>Question Text</th><th>Type</th><th>Validation</th><th>Next</th><th>Actions</th></tr></thead><tbody>';
+  BOT_QUESTIONS.forEach(function(q) {
+    let nextLabel = 'Next (#)';
+    if (q.next_question_id) {
+      const nq = BOT_QUESTIONS.find(function(x) { return x.id === q.next_question_id; });
+      nextLabel = nq ? '#' + nq.order_index + ' ' + nq.field_name : sid(q.next_question_id);
+    }
+    h += '<tr><td><b>' + q.order_index + '</b></td>';
+    h += '<td><code>' + esc(q.field_name) + '</code>' + (q.is_required ? '' : ' <span class="muted small">(opt)</span>') + '</td>';
+    h += '<td>' + esc(q.question_text) + '</td>';
+    h += '<td><span class="pill p-gray">' + esc(q.question_type) + '</span></td>';
+    h += '<td><span class="small muted">' + esc(q.validation_rule || 'none') + '</span></td>';
+    h += '<td><span class="small">' + nextLabel + '</span></td>';
+    h += '<td><div class="row" style="margin:0">';
+    h += '<button class="small" onclick="goToQuestionConditions(\'' + esc(q.id) + '\')">Conditions</button>';
+    h += '<button class="small" onclick="editBotQuestion(\'' + esc(q.id) + '\')">Edit</button>';
+    h += '<button class="small danger" onclick="deleteBotQuestion(\'' + esc(q.id) + '\')">Delete</button>';
+    h += '</div></td></tr>';
+  });
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}
+
+async function saveBotQuestion() {
+  if (!curBotFlowId) { toast('Please select a flow first', 'err'); return; }
+  const editId = val('bq_edit_id');
+  const text = val('bq_text');
+  const field = val('bq_field');
+  const type = val('bq_type');
+  const order = parseInt(val('bq_order'), 10) || 0;
+  const validation = val('bq_validation');
+  const error = val('bq_error');
+  const nextId = val('bq_next') || null;
+  const req = document.getElementById('bq_req').checked;
+
+  if (!text) { toast('Question text required', 'err'); return; }
+  if (!field) { toast('Field name required', 'err'); return; }
+
+  let allowed = null;
+  if (type === 'select') {
+    const lines = val('bq_allowed').split('\n').map(function(s) { return s.trim(); }).filter(Boolean);
+    if (!lines.length) { toast('Select type requires at least one allowed value', 'err'); return; }
+    allowed = JSON.stringify(lines);
+  }
+
+  const payload = {
+    question_text: text,
+    field_name: field,
+    question_type: type,
+    validation_rule: validation,
+    allowed_values: allowed,
+    error_message: error,
+    next_question_id: nextId,
+    is_required: req,
+    order_index: order
+  };
+
+  let r;
+  if (editId) {
+    r = await api('PUT', '/api/bot/questions/' + editId, payload);
+  } else {
+    r = await api('POST', '/api/bot/flows/' + curBotFlowId + '/questions', payload);
+  }
+
+  if (r.ok) {
+    toast(editId ? 'Question updated' : 'Question added');
+    cancelEditBotQuestion();
+    loadBotQuestions(curBotFlowId);
+  }
+}
+
+function editBotQuestion(id) {
+  const q = BOT_QUESTIONS.find(function(x) { return x.id === id; });
+  if (!q) return;
+  document.getElementById('bq_edit_id').value = q.id;
+  document.getElementById('bq_text').value = q.question_text || '';
+  document.getElementById('bq_field').value = q.field_name || '';
+  document.getElementById('bq_type').value = q.question_type || 'text';
+  document.getElementById('bq_order').value = q.order_index != null ? q.order_index : 0;
+  document.getElementById('bq_validation').value = q.validation_rule || '';
+  document.getElementById('bq_error').value = q.error_message || '';
+  document.getElementById('bq_next').value = q.next_question_id || '';
+  document.getElementById('bq_req').checked = !!q.is_required;
+
+  onQuestionTypeChange(q.question_type);
+  if (q.allowed_values) {
+    try {
+      const arr = JSON.parse(q.allowed_values);
+      document.getElementById('bq_allowed').value = Array.isArray(arr) ? arr.join('\n') : q.allowed_values;
+    } catch (e) {
+      document.getElementById('bq_allowed').value = q.allowed_values;
+    }
+  } else {
+    document.getElementById('bq_allowed').value = '';
+  }
+
+  document.getElementById('bq_form_title').textContent = 'Edit Question (' + q.field_name + ')';
+  document.getElementById('bq_submit_btn').textContent = 'Update Question';
+  document.getElementById('bq_cancel_btn').classList.remove('hidden');
+  document.getElementById('bq_form_panel').scrollIntoView({behavior: 'smooth'});
+}
+
+function cancelEditBotQuestion() {
+  document.getElementById('bq_edit_id').value = '';
+  document.getElementById('bq_text').value = '';
+  document.getElementById('bq_field').value = '';
+  document.getElementById('bq_type').value = 'text';
+  document.getElementById('bq_order').value = (BOT_QUESTIONS.length + 1) * 10;
+  document.getElementById('bq_validation').value = '';
+  document.getElementById('bq_error').value = '';
+  document.getElementById('bq_next').value = '';
+  document.getElementById('bq_req').checked = true;
+  document.getElementById('bq_allowed').value = '';
+  onQuestionTypeChange('text');
+
+  document.getElementById('bq_form_title').textContent = 'Add Question';
+  document.getElementById('bq_submit_btn').textContent = 'Add Question';
+  document.getElementById('bq_cancel_btn').classList.add('hidden');
+}
+
+async function deleteBotQuestion(id) {
+  if (!confirm('Are you sure you want to delete this question?')) return;
+  const r = await api('DELETE', '/api/bot/questions/' + id);
+  if (r.ok) {
+    toast('Question deleted');
+    loadBotQuestions(curBotFlowId);
+  }
+}
+
+function goToQuestionConditions(questionId) {
+  curBotQuestionId = questionId;
+  switchBotTab('conditions');
+}
+
+async function loadBotQuestionsDropdown() {
+  const selQ = document.getElementById('bc_question_select');
+  const selTq = document.getElementById('bc_target_q');
+  if (!curBotFlowId && BOT_FLOWS.length) curBotFlowId = BOT_FLOWS[0].id;
+  if (curBotFlowId) {
+    const r = await api('GET', '/api/bot/flows/' + curBotFlowId + '/questions');
+    if (r.ok) {
+      const qs = r.data || [];
+      let qOpts = qs.map(function(q) {
+        return '<option value="' + esc(q.id) + '">#' + q.order_index + ' ' + esc(q.field_name) + ' — ' + esc(q.question_text.slice(0, 30)) + '</option>';
+      }).join('');
+      selQ.innerHTML = qOpts || '<option value="">No questions in current flow</option>';
+      selTq.innerHTML = '<option value="">Jump to Question…</option>' + qOpts;
+      if (!curBotQuestionId && qs.length) curBotQuestionId = qs[0].id;
+      if (curBotQuestionId) selQ.value = curBotQuestionId;
+    }
+  }
+  loadBotFlowsDropdown();
+}
+
+async function loadBotConditions(questionId) {
+  if (!questionId) {
+    document.getElementById('bot_conditions_list').innerHTML = '<div class="empty">Please select a question above.</div>';
+    return;
+  }
+  curBotQuestionId = questionId;
+  const r = await api('GET', '/api/bot/questions/' + questionId + '/conditions');
+  if (!r.ok) return;
+  const conds = r.data || [];
+  const el = document.getElementById('bot_conditions_list');
+  if (!conds.length) {
+    el.innerHTML = '<div class="empty">No branching conditions for this question. Default routing applies.</div>';
+    return;
+  }
+  let h = '<table><thead><tr><th>Operator</th><th>Value</th><th>Target</th><th>Actions</th></tr></thead><tbody>';
+  conds.forEach(function(c) {
+    let targetStr = '—';
+    if (c.target_question_id) targetStr = 'Question: ' + sid(c.target_question_id);
+    else if (c.target_flow_id) targetStr = 'Flow: ' + sid(c.target_flow_id);
+    h += '<tr><td><code>' + esc(c.condition_operator) + '</code></td>';
+    h += '<td><b>' + esc(c.condition_value) + '</b></td>';
+    h += '<td>' + targetStr + '</td>';
+    h += '<td><button class="small danger" onclick="deleteBotCondition(\'' + esc(c.id) + '\')">Delete</button></td></tr>';
+  });
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}
+
+async function addBotCondition() {
+  const qId = val('bc_question_select') || curBotQuestionId;
+  if (!qId) { toast('Please select a question', 'err'); return; }
+  const op = val('bc_op');
+  const value = val('bc_val');
+  const targetQ = val('bc_target_q') || null;
+  const targetF = val('bc_target_f') || null;
+
+  if (!value) { toast('Value required', 'err'); return; }
+  if (!targetQ && !targetF) { toast('Specify a target question or target flow', 'err'); return; }
+
+  const r = await api('POST', '/api/bot/questions/' + qId + '/conditions', {
+    condition_operator: op,
+    condition_value: value,
+    target_question_id: targetQ,
+    target_flow_id: targetF
+  });
+  if (r.ok) {
+    toast('Condition added');
+    document.getElementById('bc_val').value = '';
+    loadBotConditions(qId);
+  }
+}
+
+async function deleteBotCondition(id) {
+  if (!confirm('Delete this condition?')) return;
+  const r = await api('DELETE', '/api/bot/conditions/' + id);
+  if (r.ok) {
+    toast('Condition deleted');
+    loadBotConditions(val('bc_question_select') || curBotQuestionId);
+  }
+}
+
+async function loadBotResponses() {
+  const r = await api('GET', '/api/bot/responses');
+  if (!r.ok) return;
+  const resps = r.data || [];
+  const el = document.getElementById('bot_responses_list');
+  if (!resps.length) {
+    el.innerHTML = '<div class="empty">No system responses configured.</div>';
+    return;
+  }
+  let h = '<div style="display:flex;flex-direction:column;gap:12px">';
+  resps.forEach(function(item) {
+    const tid = 'br_txt_' + item.id.replace(/-/g, '_');
+    h += '<div class="panel" style="margin:0"><h4><code>' + esc(item.response_key) + '</code> <span class="muted small">' + esc(item.description || '') + '</span></h4>';
+    h += '<textarea id="' + tid + '" style="width:100%;height:70px;margin-bottom:8px">' + esc(item.message_text) + '</textarea>';
+    h += '<div class="row" style="margin:0"><button class="small primary" onclick="saveBotResponse(\'' + esc(item.id) + '\', \'' + tid + '\')">Save Template</button></div>';
+    h += '</div>';
+  });
+  h += '</div>';
+  el.innerHTML = h;
+}
+
+async function saveBotResponse(id, tid) {
+  const text = document.getElementById(tid).value;
+  const r = await api('PUT', '/api/bot/responses/' + id, {message_text: text});
+  if (r.ok) {
+    toast('Response template saved');
+  }
 }
 
