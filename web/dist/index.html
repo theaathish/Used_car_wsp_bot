@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <link rel="icon" href="data:,"/>
 <title>AutoKart Admin</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jerosoler/Drawflow/dist/drawflow.min.css"/>
+<script src="https://cdn.jsdelivr.net/gh/jerosoler/Drawflow/dist/drawflow.min.js"></script>
 <style>
 :root{--bg:#eef1f6;--panel:#ffffff;--panel2:#e6ebf2;--line:#dbe1ea;--txt:#172130;--dim:#64748b;--acc:#2563eb;--ok:#15803d;--warn:#b45309;--bad:#b91c1c;--info:#1d4ed8}
 *{box-sizing:border-box}
@@ -77,6 +79,28 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 .simthread .bub.in{background:#fff}.simthread .bub.out{background:#cfe3ff}
 .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .toolbar input[type=search]{min-width:200px}
+/* Drawflow Bot Canvas */
+.view-toggle{display:inline-flex;background:#e2e8f0;border-radius:8px;padding:2px}
+.view-toggle button{border:none;background:transparent;padding:5px 12px;border-radius:6px;font-weight:600;font-size:12px;cursor:pointer}
+.view-toggle button.on{background:#fff;color:var(--acc);box-shadow:0 1px 3px #0000001a}
+.canvas-wrapper{position:relative;width:100%;height:640px;border-radius:12px;overflow:hidden;border:1px solid var(--line);box-shadow:0 1px 3px #0f172214}
+#drawflow{width:100%;height:100%;background:#f8fafc;background-image:radial-gradient(#cbd5e1 1.2px, transparent 1.2px);background-size:20px 20px;position:relative}
+.drawflow .drawflow-node{background:var(--panel);border:1.5px solid var(--line);border-radius:10px;width:240px;min-height:96px;padding:10px 12px;box-shadow:0 4px 12px #0f172214;color:var(--txt);cursor:grab;transition:border-color .15s,box-shadow .15s}
+.drawflow .drawflow-node:hover{border-color:#94a3b8}
+.drawflow .drawflow-node.selected{border-color:var(--acc);box-shadow:0 0 0 3px #2563eb33}
+.drawflow .drawflow-node .input{width:14px;height:14px;background:#fff;border:2.5px solid var(--acc);border-radius:50%;left:-8px}
+.drawflow .drawflow-node .output{width:14px;height:14px;background:#fff;border:2.5px solid var(--acc);border-radius:50%;right:-8px}
+.drawflow .drawflow-node .input:hover,.drawflow .drawflow-node .output:hover{background:var(--acc)}
+.drawflow .drawflow-node .output.output_cond{border-color:#f59e0b}
+.drawflow .drawflow-node .output.output_cond:hover{background:#f59e0b}
+.drawflow .connection .main-path{stroke:#3b82f6;stroke-width:3px}
+.drawflow .connection.selected .main-path{stroke:#2563eb;stroke-width:4px}
+.df-node-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;font-size:12px;font-weight:700}
+.df-node-field{font-family:monospace;font-size:12px;color:var(--txt)}
+.df-node-text{font-size:11px;color:var(--dim);line-height:1.4;max-height:42px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.df-node-ports-label{display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:var(--dim)}
+#bot_canvas_drawer{position:absolute;top:0;right:0;width:360px;height:100%;background:var(--panel);border-left:1px solid var(--line);z-index:15;padding:16px;overflow-y:auto;box-shadow:-4px 0 20px #0000001a;transition:transform .25s ease}
+#bot_canvas_drawer.closed{transform:translateX(105%);pointer-events:none}
 </style>
 </head>
 <body>
@@ -209,7 +233,117 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <input id="u_email" placeholder="email"/><input id="u_pass" placeholder="password" type="password"/>
 <select id="u_role"><option value="sales">sales</option><option value="admin">admin</option></select>
 <button class="primary" onclick="addUser()">Create</button></div></div></section>
-<section id="s-bot"><h3>Bot Configuration <span class="muted small">(admin · rule engine)</span></h3>
+<section id="s-bot">
+<div class="row" style="justify-content:space-between;margin-bottom:12px;align-items:center">
+<div>
+<h3 style="margin:0 0 4px">Bot Configuration <span class="muted small">(Admin · Rule Engine)</span></h3>
+<div class="row" style="margin:0">
+<label class="small muted" style="margin-right:4px">Active Flow:</label>
+<select id="canvas_flow_select" onchange="onCanvasFlowChange(this.value)" style="min-width:200px;font-weight:600"></select>
+</div>
+</div>
+<div class="view-toggle">
+<button id="btn-view-canvas" class="on" onclick="setBotView('canvas')">Canvas View</button>
+<button id="btn-view-table" onclick="setBotView('table')">Table View</button>
+</div>
+</div>
+
+<!-- Canvas View -->
+<div id="bot-view-canvas">
+<div class="row canvas-bar" style="margin-bottom:10px">
+<div class="row" style="margin:0">
+<button class="primary small" onclick="quickAddQuestionNode()">+ Add Question</button>
+<button class="small" onclick="autoArrangeCanvas()">Auto-Arrange</button>
+<button class="small" onclick="loadCanvasCurrentFlow()">Refresh</button>
+</div>
+<div class="row" style="margin:0">
+<span class="muted small" style="margin-right:6px">Tip: Drag right socket to left socket to connect steps</span>
+<button class="small" onclick="canvasZoomIn()">+ Zoom</button>
+<button class="small" onclick="canvasZoomReset()">100%</button>
+<button class="small" onclick="canvasZoomOut()">- Zoom</button>
+</div>
+</div>
+<div class="canvas-wrapper">
+<div id="drawflow"></div>
+<div id="bot_canvas_drawer" class="closed">
+<div class="row" style="justify-content:space-between;margin-top:0">
+<h4 id="cd_title" style="margin:0">Edit Question</h4>
+<button class="small" onclick="closeCanvasDrawer()">✕ Close</button>
+</div>
+<input type="hidden" id="cd_id"/>
+<div style="margin:10px 0">
+<label class="small muted">Field Name (variable)*</label>
+<input id="cd_field" placeholder="e.g. budget_max" style="width:100%;margin-top:4px"/>
+</div>
+<div style="margin:10px 0">
+<label class="small muted">Question Text (sent on WhatsApp)*</label>
+<textarea id="cd_text" placeholder="WhatsApp prompt" style="width:100%;height:65px;margin-top:4px"></textarea>
+</div>
+<div class="row" style="margin:10px 0">
+<div style="flex:1">
+<label class="small muted">Type</label>
+<select id="cd_type" onchange="onCanvasDrawerTypeChange(this.value)" style="width:100%;margin-top:4px">
+<option value="text">text</option><option value="number">number</option><option value="select">select</option>
+<option value="boolean">boolean</option><option value="phone">phone</option><option value="email">email</option>
+</select>
+</div>
+<div style="width:90px">
+<label class="small muted">Order #</label>
+<input id="cd_order" type="number" style="width:100%;margin-top:4px"/>
+</div>
+</div>
+<div id="cd_allowed_wrap" class="hidden" style="margin:10px 0">
+<label class="small muted">Allowed Values (one per line)*</label>
+<textarea id="cd_allowed" placeholder="SUV&#10;Sedan&#10;Hatchback" style="width:100%;height:65px;margin-top:4px"></textarea>
+</div>
+<div style="margin:10px 0">
+<label class="small muted">Validation Rule</label>
+<input id="cd_validation" placeholder="e.g. min:0,max:99999999" style="width:100%;margin-top:4px"/>
+</div>
+<div style="margin:10px 0">
+<label class="small muted">Custom Error Message</label>
+<input id="cd_error" placeholder="Default error message" style="width:100%;margin-top:4px"/>
+</div>
+<div style="margin:10px 0">
+<label class="small muted">Default Next Step</label>
+<select id="cd_next" style="width:100%;margin-top:4px"><option value="">Sequential (by order #)</option></select>
+</div>
+<div class="row" style="margin:12px 0">
+<label class="small" style="display:flex;align-items:center;gap:4px">
+<input type="checkbox" id="cd_req" checked/> Required question
+</label>
+</div>
+<div class="row" style="margin-top:16px;justify-content:space-between">
+<button class="primary" onclick="saveCanvasDrawer()">Save Changes</button>
+<button class="danger small" onclick="deleteCanvasQuestion()">Delete</button>
+</div>
+
+<hr style="border:none;border-top:1px solid var(--line);margin:16px 0"/>
+<h4 style="margin:0 0 8px">Branching Conditions</h4>
+<p class="muted small" style="margin:0 0 10px">Jump to a specific step when user answer matches a rule.</p>
+<div id="cd_conditions_list" style="margin-bottom:12px"></div>
+<div class="panel" style="padding:10px;margin-bottom:0">
+<h4 style="margin:0 0 6px;font-size:12px">Add Condition Rule</h4>
+<div class="row" style="margin:4px 0">
+<select id="cd_c_op" style="flex:1">
+<option value="eq">equals (=)</option><option value="neq">not equals (!=)</option>
+<option value="gt">greater than (&gt;)</option><option value="lt">less than (&lt;)</option>
+<option value="gte">greater or equal (&gt;=)</option><option value="lte">less or equal (&lt;=)</option>
+<option value="contains">contains</option><option value="in">in (comma-sep)</option>
+</select>
+<input id="cd_c_val" placeholder="Value" style="flex:1"/>
+</div>
+<div class="row" style="margin:4px 0">
+<select id="cd_c_target_q" style="width:100%"><option value="">Jump to Question…</option></select>
+</div>
+<button class="small primary" style="width:100%;margin-top:4px" onclick="addCanvasCondition()">+ Add Rule</button>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Table View -->
+<div id="bot-view-table" class="hidden">
 <div class="row" style="margin-bottom:14px;border-bottom:1px solid var(--line);padding-bottom:10px">
 <button class="small primary" id="btn-bot-flows" onclick="switchBotTab('flows')">Flows</button>
 <button class="small" id="btn-bot-questions" onclick="switchBotTab('questions')">Questions</button>
