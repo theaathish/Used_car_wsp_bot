@@ -168,6 +168,12 @@ func TestBotAdmin_CRUD(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list responses code = %d", rec.Code)
 	}
+
+	// 12. Reset Default Bot Config
+	rec = doReq("POST", "/api/bot/reset-defaults", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reset defaults code = %d; body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestSimulateEndpoint(t *testing.T) {

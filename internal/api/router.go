@@ -300,6 +300,8 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.listBotResponses(w, r)
 	case strings.HasPrefix(p, "/api/bot/responses/") && (r.Method == "PATCH" || r.Method == "PUT"):
 		s.patchBotResponse(w, r)
+	case p == "/api/bot/reset-defaults" && r.Method == "POST":
+		s.resetDefaultBotConfig(w, r)
 	case p == "/api/whatsapp/status" && r.Method == "GET":
 		writeJSON(w, s.WA.Status())
 	case p == "/api/whatsapp/qr" && r.Method == "GET":

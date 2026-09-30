@@ -725,8 +725,8 @@ function autoArrangeCanvas() {
   renderBotCanvas(curBotFlowId, true);
 }
 
-async function loadCanvasFlowsDropdown() {
-  if (!BOT_FLOWS.length) {
+async function loadCanvasFlowsDropdown(force) {
+  if (force || !BOT_FLOWS.length) {
     const r = await api('GET', '/api/bot/flows');
     if (r.ok) BOT_FLOWS = r.data || [];
   }
@@ -738,12 +738,14 @@ async function loadCanvasFlowsDropdown() {
   sel.innerHTML = opts || '<option value="">No flows exist</option>';
 
   if (!curBotFlowId && BOT_FLOWS.length) {
-    curBotFlowId = BOT_FLOWS[0].id;
+    const entryFlow = BOT_FLOWS.find(function(f) { return f.is_entry_flow; });
+    curBotFlowId = entryFlow ? entryFlow.id : BOT_FLOWS[0].id;
   }
   if (curBotFlowId) {
     sel.value = curBotFlowId;
     renderBotCanvas(curBotFlowId);
   }
+  updateDefaultFlowButtonUI();
 }
 
 function onCanvasFlowChange(flowId) {
@@ -751,7 +753,118 @@ function onCanvasFlowChange(flowId) {
   closeCanvasDrawer();
   const tableSel = document.getElementById('bq_flow_select');
   if (tableSel) tableSel.value = flowId;
+  updateDefaultFlowButtonUI();
   renderBotCanvas(flowId);
+}
+
+function updateDefaultFlowButtonUI() {
+  const btn = document.getElementById('btn-set-default-flow');
+  if (!btn) return;
+  if (!curBotFlowId) {
+    btn.style.display = 'none';
+    return;
+  }
+  btn.style.display = 'inline-block';
+  const f = BOT_FLOWS.find(function(x) { return x.id === curBotFlowId; });
+  if (f && f.is_entry_flow) {
+    btn.textContent = '★ Default Flow';
+    btn.className = 'small btn-default-active';
+    btn.title = 'This flow is currently the WhatsApp entry flow';
+  } else {
+    btn.textContent = 'Set as Default';
+    btn.className = 'small';
+    btn.title = 'Set this flow as the WhatsApp entry flow';
+  }
+}
+
+async function makeCurrentFlowDefault() {
+  if (!curBotFlowId) {
+    toast('Please select a flow first', 'err');
+    return;
+  }
+  const f = BOT_FLOWS.find(function(x) { return x.id === curBotFlowId; });
+  if (f && f.is_entry_flow) {
+    toast('This flow is already the WhatsApp entry flow');
+    return;
+  }
+  const btn = document.getElementById('btn-set-default-flow');
+  if (btn) btn.textContent = 'Setting…';
+  const r = await api('PATCH', '/api/bot/flows/' + curBotFlowId, { is_entry_flow: true });
+  if (r.ok) {
+    toast('Flow set as default entry flow');
+    await loadCanvasFlowsDropdown(true);
+    if (typeof loadBotFlows === 'function') loadBotFlows();
+  } else {
+    toast(r.error || 'Failed to update entry flow', 'err');
+    updateDefaultFlowButtonUI();
+  }
+}
+
+async function applyDefaultBotConfig() {
+  const ok = confirm("Restore default bot configuration?\n\nThis will apply standard 'Buy a Car' (entry flow) and 'Sell a Car' flows with 15 questions, branching conditions, and response templates.");
+  if (!ok) return;
+
+  const btn = document.getElementById('btn-reset-defaults');
+  const oldText = btn ? btn.textContent : '↺ Default Settings';
+  if (btn) {
+    btn.textContent = 'Applying…';
+    btn.disabled = true;
+  }
+  markCanvasSaving();
+
+  const r = await api('POST', '/api/bot/reset-defaults', {});
+  if (r.ok) {
+    toast('Default bot configuration applied successfully!');
+    const fr = await api('GET', '/api/bot/flows');
+    if (fr.ok) {
+      BOT_FLOWS = fr.data || [];
+      const entryFlow = BOT_FLOWS.find(function(x) { return x.is_entry_flow; }) || BOT_FLOWS[0];
+      if (entryFlow) curBotFlowId = entryFlow.id;
+    }
+    await loadCanvasFlowsDropdown(true);
+    if (curBotFlowId) renderBotCanvas(curBotFlowId);
+    if (typeof loadBotFlows === 'function') loadBotFlows();
+    markCanvasSaved();
+  } else {
+    toast(r.error || 'Failed to apply default configuration', 'err');
+    markCanvasSaved();
+  }
+
+  if (btn) {
+    btn.textContent = oldText;
+    btn.disabled = false;
+  }
+}
+
+function markCanvasSaving() {
+  const btn = document.getElementById('btn-canvas-saved');
+  if (btn) {
+    btn.classList.add('saving');
+    btn.textContent = '● Saving…';
+  }
+}
+
+function markCanvasSaved() {
+  const btn = document.getElementById('btn-canvas-saved');
+  if (btn) {
+    btn.classList.remove('saving');
+    btn.textContent = '✓ Saved';
+  }
+}
+
+async function saveCanvasState() {
+  if (curCanvasQuestionId && !document.getElementById('bot_canvas_drawer').classList.contains('closed')) {
+    markCanvasSaving();
+    await saveCanvasDrawer();
+    markCanvasSaved();
+    toast('Question and flow state saved');
+    return;
+  }
+  markCanvasSaving();
+  setTimeout(function() {
+    markCanvasSaved();
+    toast('All flow nodes and connections are saved');
+  }, 250);
 }
 
 function loadCanvasCurrentFlow() {
@@ -874,8 +987,10 @@ async function onCanvasConnectionCreated(info) {
   const tgtQId = dfIdToQId[info.input_id];
   if (!srcQId || !tgtQId) return;
 
+  markCanvasSaving();
   if (info.output_class === 'output_1') {
     const r = await api('PATCH', '/api/bot/questions/' + srcQId, { next_question_id: tgtQId });
+    markCanvasSaved();
     if (r.ok) {
       const q = BOT_QUESTIONS.find(function(x) { return x.id === srcQId; });
       if (q) q.next_question_id = tgtQId;
@@ -892,11 +1007,16 @@ async function onCanvasConnectionCreated(info) {
       const cond = conds[condIndex];
       cond.target_question_id = tgtQId;
       const r = await api('PATCH', '/api/bot/conditions/' + cond.id, { target_question_id: tgtQId });
+      markCanvasSaved();
       if (r.ok) {
         toast('Branch rule connected');
         if (curCanvasQuestionId === srcQId) loadCanvasConditions(srcQId);
       }
+    } else {
+      markCanvasSaved();
     }
+  } else {
+    markCanvasSaved();
   }
 }
 
@@ -905,8 +1025,10 @@ async function onCanvasConnectionRemoved(info) {
   const srcQId = dfIdToQId[info.output_id];
   if (!srcQId) return;
 
+  markCanvasSaving();
   if (info.output_class === 'output_1') {
     const r = await api('PATCH', '/api/bot/questions/' + srcQId, { next_question_id: '' });
+    markCanvasSaved();
     if (r.ok) {
       const q = BOT_QUESTIONS.find(function(x) { return x.id === srcQId; });
       if (q) q.next_question_id = null;
@@ -923,11 +1045,16 @@ async function onCanvasConnectionRemoved(info) {
       const cond = conds[condIndex];
       cond.target_question_id = null;
       const r = await api('PATCH', '/api/bot/conditions/' + cond.id, { target_question_id: '' });
+      markCanvasSaved();
       if (r.ok) {
         toast('Branch target cleared');
         if (curCanvasQuestionId === srcQId) loadCanvasConditions(srcQId);
       }
+    } else {
+      markCanvasSaved();
     }
+  } else {
+    markCanvasSaved();
   }
 }
 
@@ -1038,7 +1165,9 @@ async function saveCanvasDrawer() {
     allowed_values: allowed
   };
 
+  markCanvasSaving();
   const r = await api('PATCH', '/api/bot/questions/' + curCanvasQuestionId, payload);
+  markCanvasSaved();
   if (r.ok) {
     toast('Question updated');
     const curQ = curCanvasQuestionId;
@@ -1060,7 +1189,9 @@ async function quickAddQuestionNode() {
     is_required: true,
     allowed_values: []
   };
+  markCanvasSaving();
   const r = await api('POST', '/api/bot/questions', payload);
+  markCanvasSaved();
   if (r.ok) {
     toast('Question added');
     await renderBotCanvas(curBotFlowId);
@@ -1071,7 +1202,9 @@ async function quickAddQuestionNode() {
 async function deleteCanvasQuestion() {
   if (!curCanvasQuestionId) return;
   if (!confirm('Are you sure you want to delete this question and all its connections?')) return;
+  markCanvasSaving();
   const r = await api('DELETE', '/api/bot/questions/' + curCanvasQuestionId);
+  markCanvasSaved();
   if (r.ok) {
     toast('Question deleted');
     closeCanvasDrawer();
@@ -1118,7 +1251,9 @@ async function addCanvasCondition() {
     target_question_id: targetQ
   };
 
+  markCanvasSaving();
   const r = await api('POST', '/api/bot/conditions', payload);
+  markCanvasSaved();
   if (r.ok) {
     toast('Branch rule added');
     document.getElementById('cd_c_val').value = '';
@@ -1129,7 +1264,9 @@ async function addCanvasCondition() {
 
 async function deleteCanvasCondition(condId) {
   if (!confirm('Delete this condition rule?')) return;
+  markCanvasSaving();
   const r = await api('DELETE', '/api/bot/conditions/' + condId);
+  markCanvasSaved();
   if (r.ok) {
     toast('Condition rule deleted');
     loadCanvasConditions(curCanvasQuestionId);
@@ -1167,6 +1304,7 @@ async function loadBotFlows() {
     }).join('');
     if (curBotFlowId) canvasSel.value = curBotFlowId;
   }
+  updateDefaultFlowButtonUI();
   const el = document.getElementById('bot_flows_list');
   if (!BOT_FLOWS.length) {
     el.innerHTML = '<div class="empty">No flows configured yet. Create one above.</div>';
@@ -1528,8 +1666,9 @@ async function loadBotResponses() {
   let h = '<div style="display:flex;flex-direction:column;gap:12px">';
   resps.forEach(function(item) {
     const tid = 'br_txt_' + item.id.replace(/-/g, '_');
+    const txtVal = item.message_text || item.response_text || '';
     h += '<div class="panel" style="margin:0"><h4><code>' + esc(item.response_key) + '</code> <span class="muted small">' + esc(item.description || '') + '</span></h4>';
-    h += '<textarea id="' + tid + '" style="width:100%;height:70px;margin-bottom:8px">' + esc(item.message_text) + '</textarea>';
+    h += '<textarea id="' + tid + '" style="width:100%;height:70px;margin-bottom:8px">' + esc(txtVal) + '</textarea>';
     h += '<div class="row" style="margin:0"><button class="small primary" onclick="saveBotResponse(\'' + esc(item.id) + '\', \'' + tid + '\')">Save Template</button></div>';
     h += '</div>';
   });
@@ -1543,5 +1682,75 @@ async function saveBotResponse(id, tid) {
   if (r.ok) {
     toast('Response template saved');
   }
+}
+
+let botResponsesCache = [];
+
+async function openGreetingModal() {
+  const modal = document.getElementById('bot_greeting_modal');
+  const container = document.getElementById('bot_greeting_fields');
+  if (!modal || !container) return;
+  modal.classList.remove('hidden');
+  container.innerHTML = '<div class="muted small">Loading greeting templates…</div>';
+
+  const r = await api('GET', '/api/bot/responses');
+  if (!r.ok) {
+    container.innerHTML = '<div class="muted small" style="color:var(--bad)">Failed to load responses</div>';
+    return;
+  }
+  botResponsesCache = r.data || [];
+  if (!botResponsesCache.length) {
+    container.innerHTML = '<div class="muted small">No responses found. Click "↺ Default Settings" in Bot Configuration to generate standard templates.</div>';
+    return;
+  }
+
+  const greetingKeys = [
+    { key: 'welcome', label: 'Welcome Message (First interaction)', desc: 'Sent when customer first messages the bot' },
+    { key: 'greeting', label: 'General Greeting', desc: 'Sent when returning customer says hi or hello' },
+    { key: 'flow_complete', label: 'Flow Complete / Thank You', desc: 'Sent when the flow finishes before vehicle matching' },
+    { key: 'no_matching_vehicle', label: 'No Vehicles Matched', desc: 'Sent when no cars match search criteria' },
+    { key: 'invalid_input', label: 'Invalid Input / Try Again', desc: 'Sent when answer does not match expected format' },
+    { key: 'bot_disabled', label: 'Bot Offline / Paused', desc: 'Sent when customer messages while bot is disabled' }
+  ];
+
+  let h = '';
+  greetingKeys.forEach(function(g) {
+    const item = botResponsesCache.find(function(x) { return x.response_key === g.key; });
+    const val = item ? (item.message_text || item.response_text || '') : '';
+    const itemId = item ? item.id : '';
+    h += '<div style="background:#f8fafc;padding:12px;border-radius:8px;border:1px solid var(--line)">';
+    h += '<div style="display:flex;justify-content:space-between;margin-bottom:4px"><b style="font-size:13px">' + esc(g.label) + '</b><code class="muted small">' + esc(g.key) + '</code></div>';
+    h += '<div class="muted small" style="margin-bottom:6px">' + esc(g.desc) + '</div>';
+    h += '<textarea id="greet_val_' + esc(g.key) + '" data-id="' + esc(itemId) + '" data-key="' + esc(g.key) + '" style="width:100%;height:65px;font-size:13px">' + esc(val) + '</textarea>';
+    h += '</div>';
+  });
+  container.innerHTML = h;
+}
+
+function closeGreetingModal() {
+  const modal = document.getElementById('bot_greeting_modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function saveGreetingSettings() {
+  const container = document.getElementById('bot_greeting_fields');
+  if (!container) return;
+  const textareas = container.querySelectorAll('textarea');
+  let savedCount = 0;
+  for (let i = 0; i < textareas.length; i++) {
+    const ta = textareas[i];
+    const id = ta.getAttribute('data-id');
+    const val = ta.value;
+    if (id) {
+      const orig = botResponsesCache.find(function(x) { return x.id === id; });
+      if (orig && (orig.message_text || orig.response_text || '') !== val) {
+        await api('PUT', '/api/bot/responses/' + id, { message_text: val });
+        savedCount++;
+      }
+    }
+  }
+  toast(savedCount > 0 ? 'Greeting messages saved' : 'No changes to save');
+  closeGreetingModal();
+  if (typeof loadBotResponses === 'function') loadBotResponses();
 }
 
