@@ -583,9 +583,13 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 	if nlp.Intent == IntentTestDrive || nlp.Intent == IntentFinance || nlp.Intent == IntentHuman || nlp.Intent == IntentSell {
 		return false
 	}
-	// Direct search phrases are not simple survey answers
+	// Direct search phrases or buy switches are not simple survey answers
 	lower := strings.ToLower(body)
-	if strings.Contains(lower, "i want") || strings.Contains(lower, "looking for") || strings.Contains(lower, "show me") || strings.Contains(lower, "want a") || strings.Contains(lower, "need a") {
+	if strings.Contains(lower, "i want") || strings.Contains(lower, "looking for") ||
+		strings.Contains(lower, "show me") || strings.Contains(lower, "want a") ||
+		strings.Contains(lower, "need a") || strings.Contains(lower, "find me") ||
+		strings.Contains(lower, "buy") || strings.Contains(lower, "purchase") ||
+		strings.Contains(lower, "browse") {
 		return false
 	}
 
@@ -744,22 +748,31 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		}
 	}
 
-	// Check if user explicitly switches from sell mode to buy
-	lowerBody := strings.ToLower(body)
+	// Check if user explicitly switches from sell mode to buy, or expresses search/purchase intent
+	lowerBody := strings.ToLower(strings.TrimSpace(body))
 	explicitBuy := strings.Contains(lowerBody, "buy") ||
 		strings.Contains(lowerBody, "purchase") ||
 		strings.Contains(lowerBody, "browse") ||
 		strings.Contains(lowerBody, "looking to buy") ||
-		strings.Contains(lowerBody, "want to buy")
+		strings.Contains(lowerBody, "want to buy") ||
+		strings.Contains(lowerBody, "i want") ||
+		strings.Contains(lowerBody, "want a") ||
+		strings.Contains(lowerBody, "need a") ||
+		strings.Contains(lowerBody, "looking for") ||
+		strings.Contains(lowerBody, "show me") ||
+		strings.Contains(lowerBody, "find me")
 
-	if isSellMode && explicitBuy {
+	if explicitBuy {
 		isSellMode = false
+		nlp.Intent = IntentBuy
+		nlp.HasSearchSignals = true
 		if leadID != "" {
 			_, _ = tx.Exec(ctx, `UPDATE leads SET intent='BUY', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
 		}
+		_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
 	}
 
-	if nlp.Intent == IntentSell || nlp.HasSellSignals || isSellMode {
+	if (nlp.Intent == IntentSell || nlp.HasSellSignals || isSellMode) && !explicitBuy {
 		brand := nlp.Brand
 		model := nlp.Model
 		if brand == "" {
@@ -780,12 +793,11 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			km = int(kNum)
 		}
 
-		if brand != "" && model != "" {
-			if year == 0 {
-				year = 2020
-			}
+		// Only auto-evaluate and accept if user provided complete vehicle specifications:
+		// Brand, Model, and Year MUST be provided (> 0). Year is NEVER defaulted!
+		if brand != "" && model != "" && year > 0 {
 			if km == 0 {
-				km = 35000
+				km = 35000 // reasonable default if mileage omitted but year was specified
 			}
 			fuel := nlp.Fuel
 			if fuel == "" {
@@ -823,6 +835,11 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			reply := fmt.Sprintf("🎉 *Vehicle Review Complete!*\n\nYour %d %s %s has been automatically evaluated and accepted into our inventory!\n\n📋 *Estimated Valuation*: ₹%s\n📍 *Status*: Verified & Listed as Available\n\nOur team will contact you shortly to coordinate vehicle pickup and paperwork.",
 				year, brand, model, FormatPrice(valPrice))
 			return reply, true, nil
+		}
+
+		// If user is currently answering a structured flow without explicit sell intent, let the questionnaire handle it!
+		if currentQuestion != nil && !nlp.HasSellSignals && nlp.Intent != IntentSell {
+			return "", false, nil
 		}
 
 		// Save sell_mode and whatever partial fields are provided

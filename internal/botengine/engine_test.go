@@ -962,6 +962,102 @@ func TestEngine_WelcomeGreetingAndBuySellBranching(t *testing.T) {
 	if leadIntent != "SELL" {
 		t.Fatalf("expected lead intent SELL, got %q", leadIntent)
 	}
+
+	// 5. User replies "i want bmw m4" while in sell flow -> MUST switch to BUY search, NOT accept fake car!
+	_, _ = tx.Exec(ctx, `INSERT INTO vehicles(id, make, model, year, price, fuel, transmission, description, status)
+		VALUES (gen_random_uuid(), 'BMW', '320i', 2021, 150000, 'Petrol', 'Automatic', 'Luxury Sedan', 'AVAILABLE')`)
+
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "i want bmw m4")
+	if err != nil {
+		t.Fatalf("step 5 err: %v", err)
+	}
+	if strings.Contains(reply, "Vehicle Review Complete") || strings.Contains(reply, "Estimated Valuation") {
+		t.Fatalf("CRITICAL BUG: Bot accepted a fake car valuation instead of switching to buy search: %q", reply)
+	}
+	if !strings.Contains(reply, "BMW") {
+		t.Fatalf("expected BMW inventory match or fallback in reply, got: %q", reply)
+	}
+
+	// Verify lead intent switched to BUY
+	_ = tx.QueryRow(ctx, `SELECT intent FROM leads WHERE id=$1`, leadID).Scan(&leadIntent)
+	if leadIntent != "BUY" {
+		t.Fatalf("expected lead intent BUY, got %q", leadIntent)
+	}
+
+	// Verify NO sell_requests were created
+	var srCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM sell_requests WHERE lead_id=$1`, leadID).Scan(&srCount)
+	if srCount != 0 {
+		t.Fatalf("expected 0 sell requests created, got %d", srCount)
+	}
+}
+
+func TestEngine_SellFlow_DoesNotDefaultYearOrKm(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://localhost/sellingbot_test?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	engine := New(pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60199990009', 'RealSeller') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// 1. Initial greeting
+	_, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
+	if err != nil {
+		t.Fatalf("hi err: %v", err)
+	}
+
+	// 2. Select Sell
+	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "2")
+	if err != nil {
+		t.Fatalf("select sell err: %v", err)
+	}
+	if !strings.Contains(reply, "brand") && !strings.Contains(reply, "make") {
+		t.Fatalf("expected brand question, got: %q", reply)
+	}
+
+	// 3. User provides only brand: "Toyota"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Toyota")
+	if err != nil {
+		t.Fatalf("answer brand err: %v", err)
+	}
+	// Must NOT accept or review early
+	if strings.Contains(reply, "Vehicle Review Complete") || strings.Contains(reply, "Estimated Valuation") {
+		t.Fatalf("must not review early on just brand, got: %q", reply)
+	}
+	// Must advance to question 2 (model)
+	if !strings.Contains(strings.ToLower(reply), "model") {
+		t.Fatalf("expected model question, got: %q", reply)
+	}
+
+	// 4. User provides model: "Camry"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Camry")
+	if err != nil {
+		t.Fatalf("answer model err: %v", err)
+	}
+	// Must NOT accept early with fake year 2020!
+	if strings.Contains(reply, "Vehicle Review Complete") || strings.Contains(reply, "Estimated Valuation") {
+		t.Fatalf("must not review early on brand+model without year, got: %q", reply)
+	}
+	// Must advance to question 3 (year)
+	if !strings.Contains(strings.ToLower(reply), "year") {
+		t.Fatalf("expected year question, got: %q", reply)
+	}
 }
 
 
