@@ -633,5 +633,141 @@ func TestEngine_SessionExpiry(t *testing.T) {
 	}
 }
 
+func TestEngine_ConversationalNLP_Flow(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://localhost/sellingbot_test?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	engine := New(pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Clean tables
+	_, _ = tx.Exec(ctx, "DELETE FROM conversation_answers; DELETE FROM bot_conditions; DELETE FROM bot_questions; DELETE FROM bot_flows;")
+
+	// Insert test flow
+	var flowID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(name, slug, is_entry_flow, is_active) VALUES ('Buy Flow', 'buy_flow', true, true) RETURNING id`).Scan(&flowID)
+	var q1ID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_questions(flow_id, field_name, question_text, question_type, allowed_values, order_index, is_active)
+		VALUES ($1, 'vehicle_type', 'What type of car are you looking for? (SUV, Sedan, Hatchback, MPV, Any)', 'select', '["SUV", "Sedan", "Any"]'::jsonb, 1, true) RETURNING id`, flowID).Scan(&q1ID)
+
+	// Insert test BMW vehicle
+	var vID string
+	_ = tx.QueryRow(ctx, `INSERT INTO vehicles(make, model, year, price, fuel, transmission, km, status, description)
+		VALUES ('BMW', 'X1 sDrive20i', 2026, 228000, 'Petrol', 'Automatic', 10000, 'AVAILABLE', 'BMW X1 in pristine condition') RETURNING id`).Scan(&vID)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60111222333', 'NLP User') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// 1. Initial greeting
+	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
+	if err != nil {
+		t.Fatalf("greeting err: %v", err)
+	}
+	if !strings.Contains(reply, "What type of car") {
+		t.Fatalf("expected question 1 text, got %q", reply)
+	}
+
+	// 2. User says "i want bmw m4" -> should NOT fail with "Please choose one of...", should immediately match BMWs!
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "i want bmw m4")
+	if err != nil {
+		t.Fatalf("bmw search err: %v", err)
+	}
+	if !strings.Contains(reply, "BMW") || !strings.Contains(reply, "X1") {
+		t.Fatalf("expected BMW vehicle match results, got %q", reply)
+	}
+
+	// 3. User says "test drive" -> books test drive for human sales specialist
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "test drive")
+	if err != nil {
+		t.Fatalf("test drive err: %v", err)
+	}
+	if !strings.Contains(reply, "Test Drive Request Confirmed") || !strings.Contains(reply, "sales specialist") {
+		t.Fatalf("expected test drive confirmation, got %q", reply)
+	}
+
+	// Verify test drive was inserted
+	var tdCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM test_drives WHERE lead_id=$1`, leadID).Scan(&tdCount)
+	if tdCount == 0 {
+		t.Fatal("expected test_drive record to be created in DB")
+	}
+
+	// 4. User says "finance" -> logs finance application for human finance desk
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "i need finance / loan")
+	if err != nil {
+		t.Fatalf("finance err: %v", err)
+	}
+	if !strings.Contains(reply, "Finance Application Received") || !strings.Contains(reply, "finance specialist") {
+		t.Fatalf("expected finance confirmation, got %q", reply)
+	}
+
+	// Verify finance request was inserted
+	var finCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM finance_requests WHERE lead_id=$1`, leadID).Scan(&finCount)
+	if finCount == 0 {
+		t.Fatal("expected finance_request record to be created in DB")
+	}
+
+	// 5. Automated car selling flow: "sell my 2019 honda city"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "sell my 2019 honda city")
+	if err != nil {
+		t.Fatalf("sell err: %v", err)
+	}
+	if !strings.Contains(reply, "Vehicle Review Complete") || !strings.Contains(reply, "Estimated Valuation") {
+		t.Fatalf("expected sell valuation confirmation, got %q", reply)
+	}
+
+	// Verify sell_requests and vehicles record created automatically
+	var sellCount, vehCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM sell_requests WHERE lead_id=$1 AND status='ACCEPTED'`, leadID).Scan(&sellCount)
+	if sellCount == 0 {
+		t.Fatal("expected accepted sell_request record in DB")
+	}
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM vehicles WHERE make='Honda' AND model='City' AND acquired_via='customer_sell'`, ).Scan(&vehCount)
+	if vehCount == 0 {
+		t.Fatal("expected newly listed Honda City vehicle in DB")
+	}
+}
+
+func TestValidate_ConversationalTolerant(t *testing.T) {
+	// "any" for select
+	val, ok := Validate("any", "select", "", []string{"SUV", "Sedan", "Any"}, true)
+	if !ok || val != "Any" {
+		t.Fatalf("expected 'Any', true, got %q, %v", val, ok)
+	}
+
+	// "any" for number
+	val, ok = Validate("any", "number", "min:1995,max:2027", nil, true)
+	if !ok || val != "0" {
+		t.Fatalf("expected '0', true, got %q, %v", val, ok)
+	}
+
+	// "2019 to 2026" for number
+	val, ok = Validate("2019 to 2026", "number", "min:1995,max:2027", nil, true)
+	if !ok || val != "2019" {
+		t.Fatalf("expected '2019', true, got %q, %v", val, ok)
+	}
+
+	// "no preference" for select
+	val, ok = Validate("no preference", "select", "", []string{"SUV", "Sedan", "Any"}, true)
+	if !ok || val != "Any" {
+		t.Fatalf("expected 'Any', true, got %q, %v", val, ok)
+	}
+}
+
 
 

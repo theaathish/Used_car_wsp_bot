@@ -97,6 +97,19 @@ func (e *Engine) ProcessMessage(ctx context.Context, tx pgx.Tx, convID, custID, 
 		return "", fmt.Errorf("load conversation state: %w", err)
 	}
 
+	var activeQ *Question
+	if currentQuestionID != nil && *currentQuestionID != "" {
+		activeQ, _ = e.loadQuestion(ctx, tx, *currentQuestionID)
+	}
+
+	// Conversational NLP layer
+	nlp := ParseMessageNLP(body)
+	if reply, handled, err := e.handleConversationalNLP(ctx, tx, convID, custID, leadID, body, activeQ, nlp); err != nil {
+		return "", err
+	} else if handled {
+		return reply, nil
+	}
+
 	// 1. If no flow set, find entry flow
 	if currentFlowID == nil || *currentFlowID == "" {
 		entryFlowID, err := e.findEntryFlow(ctx, tx)
@@ -131,13 +144,16 @@ func (e *Engine) ProcessMessage(ctx context.Context, tx pgx.Tx, convID, custID, 
 	}
 
 	// 3. Question is set: load current question
-	q, err := e.loadQuestion(ctx, tx, *currentQuestionID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Review Focus 3: Question deleted mid-conversation -> restart flow gracefully
-			return e.restartFlow(ctx, tx, convID, currentFlowID)
+	q := activeQ
+	if q == nil {
+		q, err = e.loadQuestion(ctx, tx, *currentQuestionID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// Review Focus 3: Question deleted mid-conversation -> restart flow gracefully
+				return e.restartFlow(ctx, tx, convID, currentFlowID)
+			}
+			return "", err
 		}
-		return "", err
 	}
 
 	// 4. Validate input
@@ -510,6 +526,350 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 	}
 
 	return reply, nil
+}
+
+func (e *Engine) loadLeadExtractedData(ctx context.Context, tx pgx.Tx, leadID string) (map[string]any, error) {
+	out := map[string]any{}
+	if leadID == "" {
+		return out, nil
+	}
+	var raw []byte
+	err := tx.QueryRow(ctx, `SELECT extracted_data FROM leads WHERE id=$1`, leadID).Scan(&raw)
+	if err != nil {
+		return out, nil
+	}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &out)
+	}
+	return out, nil
+}
+
+func (e *Engine) updateLeadExtractedData(ctx context.Context, tx pgx.Tx, leadID string, updates map[string]any) error {
+	if leadID == "" || len(updates) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(updates)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE leads SET extracted_data = extracted_data || $1::jsonb, updated_at=now() WHERE id=$2`, b, leadID)
+	return err
+}
+
+func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool {
+	if q == nil {
+		return false
+	}
+	// Explicit action intents are never regular survey answers
+	if nlp.Intent == IntentTestDrive || nlp.Intent == IntentFinance || nlp.Intent == IntentHuman || nlp.Intent == IntentSell {
+		return false
+	}
+	// Direct search phrases are not simple survey answers
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "i want") || strings.Contains(lower, "looking for") || strings.Contains(lower, "show me") || strings.Contains(lower, "want a") || strings.Contains(lower, "need a") {
+		return false
+	}
+
+	switch q.FieldName {
+	case "vehicle_type":
+		if nlp.Brand != "" || nlp.Model != "" || nlp.BudgetMax > 0 {
+			return false
+		}
+		return true
+	case "budget_max", "budget":
+		if nlp.Brand != "" || nlp.Model != "" {
+			return false
+		}
+		return true
+	case "brand", "make":
+		if nlp.Brand != "" && nlp.Model != "" {
+			return false
+		}
+		return true
+	case "model":
+		return true
+	case "fuel":
+		if nlp.Brand != "" || nlp.Model != "" {
+			return false
+		}
+		return true
+	case "transmission":
+		if nlp.Brand != "" || nlp.Model != "" {
+			return false
+		}
+		return true
+	case "year_min", "year":
+		if nlp.Brand != "" || nlp.Model != "" {
+			return false
+		}
+		return true
+	default:
+		return true
+	}
+}
+
+func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID, custID, leadID, body string, currentQuestion *Question, nlp NLPEntities) (string, bool, error) {
+	// If conversation just started with no active question and user sent a bare greeting, let entry flow initialize
+	if currentQuestion == nil && isGreetingText(body) {
+		return "", false, nil
+	}
+
+	// 1. Reset / Menu
+	if nlp.Intent == IntentReset || (nlp.Intent == IntentGreeting && currentQuestion == nil) {
+		_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+		msg := "🚗 *Welcome to AutoKart!*\n" +
+			"I can help you find, finance, or sell a pre-owned car with 100% automated matching & valuation.\n\n" +
+			"You can simply type what you're looking for, e.g.:\n" +
+			"• *\"BMW M4\"* or *\"Mercedes C-Class\"*\n" +
+			"• *\"Petrol SUV under 15 Lakh\"*\n" +
+			"• *\"Automatic hatchback\"*\n\n" +
+			"Or choose an option:\n" +
+			"1️⃣ *View All Available Cars*\n" +
+			"2️⃣ *Sell Your Car* (Instant valuation & auto-listing)\n" +
+			"3️⃣ *Book a Test Drive* (Sales specialist desk)\n" +
+			"4️⃣ *Apply for Car Finance* (Finance specialist desk)"
+		return msg, true, nil
+	}
+
+	// 2. Human Agent Request
+	if nlp.Intent == IntentHuman {
+		_, _ = tx.Exec(ctx, `UPDATE conversations SET bot_enabled=false, updated_at=now() WHERE id=$1`, convID)
+		if leadID != "" {
+			_, _ = tx.Exec(ctx, `UPDATE leads SET status='FOLLOWUP', updated_at=now() WHERE id=$1`, leadID)
+		}
+		return "👤 *Connecting you with a sales specialist...*\n\nA human representative from our team will reply to you directly in this chat shortly.", true, nil
+	}
+
+	// 3. Human Work: Test Drive
+	if nlp.Intent == IntentTestDrive {
+		data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+		var targetVehID, targetMake, targetModel string
+
+		if nlp.SelectionIndex > 0 {
+			if matchIDsStr, ok := getString(data, "match_ids"); ok && matchIDsStr != "" {
+				ids := strings.Split(matchIDsStr, ",")
+				if nlp.SelectionIndex <= len(ids) {
+					targetVehID = strings.TrimSpace(ids[nlp.SelectionIndex-1])
+				}
+			}
+		}
+		if targetVehID == "" {
+			if svID, ok := getString(data, "selected_vehicle_id"); ok && svID != "" {
+				targetVehID = svID
+			}
+		}
+		if targetVehID == "" {
+			if matchIDsStr, ok := getString(data, "match_ids"); ok && matchIDsStr != "" {
+				ids := strings.Split(matchIDsStr, ",")
+				if len(ids) > 0 {
+					targetVehID = strings.TrimSpace(ids[0])
+				}
+			}
+		}
+		if targetVehID == "" && (nlp.Brand != "" || nlp.Model != "") {
+			qBrand := "%" + nlp.Brand + "%"
+			qModel := "%" + nlp.Model + "%"
+			_ = tx.QueryRow(ctx, `SELECT id::text, make, model FROM vehicles WHERE (make ILIKE $1 OR model ILIKE $2) AND status='AVAILABLE' LIMIT 1`, qBrand, qModel).Scan(&targetVehID, &targetMake, &targetModel)
+		}
+
+		if targetVehID != "" {
+			if targetMake == "" {
+				_ = tx.QueryRow(ctx, `SELECT make, model FROM vehicles WHERE id=$1`, targetVehID).Scan(&targetMake, &targetModel)
+			}
+			tID := uuid.NewString()
+			_, _ = tx.Exec(ctx, `INSERT INTO test_drives(id, lead_id, vehicle_id, scheduled_at, notes)
+				VALUES ($1, $2, $3, now() + interval '1 day', 'WhatsApp booking - Human sales follow-up')`,
+				tID, leadID, targetVehID)
+			if leadID != "" {
+				_, _ = tx.Exec(ctx, `UPDATE leads SET status='TEST_DRIVE', updated_at=now() WHERE id=$1`, leadID)
+			}
+			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+			reply := fmt.Sprintf("🚗 *Test Drive Request Confirmed!*\n\nWe have scheduled your test drive request for *%s %s*.\n\nOur human sales specialist has been assigned and will call you shortly to confirm your preferred time slot and location!", targetMake, targetModel)
+			return reply, true, nil
+		}
+
+		return "🚗 *Schedule a Test Drive*\n\nWhich vehicle would you like to test drive? Please reply with the vehicle number (e.g. *1*) or model name!", true, nil
+	}
+
+	// 4. Human Work: Finance / Loan
+	if nlp.Intent == IntentFinance {
+		if leadID != "" {
+			fID := uuid.NewString()
+			loanAmt := nlp.BudgetMax
+			if loanAmt == 0 {
+				loanAmt = 150000
+			}
+			_, _ = tx.Exec(ctx, `INSERT INTO finance_requests(id, lead_id, loan_amount, tenure_months, employment, income, status)
+				VALUES ($1, $2, $3, 60, 'Salaried', 0, 'NEW')`, fID, leadID, loanAmt)
+			_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED',
+				extracted_data = extracted_data || '{"finance_requested":"true"}',
+				updated_at=now() WHERE id=$1`, leadID)
+		}
+		_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+		return "💼 *Finance Application Received!*\n\nOur dedicated finance desk has been notified. A human finance specialist will contact you shortly to review your loan eligibility, zero-down-payment options, and customize low-interest EMI plans for you!", true, nil
+	}
+
+	// 5. Automated Selling Flow
+	if nlp.Intent == IntentSell || nlp.HasSellSignals {
+		data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+		brand := nlp.Brand
+		model := nlp.Model
+		if brand == "" {
+			brand, _ = getString(data, "sell_brand")
+		}
+		if model == "" {
+			model, _ = getString(data, "sell_model")
+		}
+
+		if brand != "" && model != "" {
+			year := nlp.YearMin
+			if year == 0 {
+				yNum, _ := getNumber(data, "sell_year")
+				year = int(yNum)
+			}
+			if year == 0 {
+				year = 2020
+			}
+			km := nlp.KM
+			if km == 0 {
+				kNum, _ := getNumber(data, "sell_km")
+				km = int(kNum)
+			}
+			if km == 0 {
+				km = 35000
+			}
+			fuel := nlp.Fuel
+			if fuel == "" {
+				fuel, _ = getString(data, "sell_fuel")
+			}
+			if fuel == "" {
+				fuel = "Petrol"
+			}
+			trans := nlp.Transmission
+			if trans == "" {
+				trans, _ = getString(data, "sell_transmission")
+			}
+			if trans == "" {
+				trans = "Automatic"
+			}
+
+			sID := uuid.NewString()
+			vID := uuid.NewString()
+			valPrice := EstimateVehicleValuation(brand, model, year, km, "Good", 0)
+
+			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, km, fuel, transmission, condition, status)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Good', 'ACCEPTED')`,
+				sID, leadID, brand, model, year, km, fuel, trans)
+
+			desc := fmt.Sprintf("Verified pre-owned %s %s (auto-reviewed & listed)", brand, model)
+			_, _ = tx.Exec(ctx, `INSERT INTO vehicles (id, make, model, year, price, fuel, transmission, km, status, description, acquired_via)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'AVAILABLE', $9, 'customer_sell')`,
+				vID, brand, model, year, valPrice, fuel, trans, km, desc)
+
+			if leadID != "" {
+				_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', updated_at=now() WHERE id=$1`, leadID)
+			}
+			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+
+			reply := fmt.Sprintf("🎉 *Vehicle Review Complete!*\n\nYour %d %s %s has been automatically evaluated and accepted into our inventory!\n\n📋 *Estimated Valuation*: ₹%s\n📍 *Status*: Verified & Listed as Available\n\nOur team will contact you shortly to coordinate vehicle pickup and paperwork.",
+				year, brand, model, FormatPrice(valPrice))
+			return reply, true, nil
+		}
+
+		return "🚗 *Sell Your Car Instantly!*\n\nPlease tell us your car's Brand, Model, Manufacturing Year, and approximate Mileage (e.g. *\"2019 Honda City, 45,000 km\"*).\n\nWe will evaluate your car automatically and list it in our inventory!", true, nil
+	}
+
+	// 6. Direct Vehicle Selection (#1, #2, etc.)
+	data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+	matchIDsStr, hasMatches := getString(data, "match_ids")
+
+	if nlp.SelectionIndex > 0 && hasMatches && matchIDsStr != "" {
+		ids := strings.Split(matchIDsStr, ",")
+		if nlp.SelectionIndex <= len(ids) {
+			vID := strings.TrimSpace(ids[nlp.SelectionIndex-1])
+			var vMake, vModel, vFuel, vTrans, vDesc string
+			var vYear, vPrice, vKM int
+			err := tx.QueryRow(ctx, `SELECT make, model, year, price, fuel, transmission, km, description
+				FROM vehicles WHERE id=$1`, vID).Scan(&vMake, &vModel, &vYear, &vPrice, &vFuel, &vTrans, &vKM, &vDesc)
+			if err == nil {
+				_ = e.updateLeadExtractedData(ctx, tx, leadID, map[string]any{"selected_vehicle_id": vID})
+				_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+				card := fmt.Sprintf("🚗 *%d %s %s*\n💰 *Price*: ₹%s\n⛽ *Fuel*: %s | ⚙️ *Transmission*: %s\n🛣️ *Mileage*: %d km\n📋 *Details*: %s\n\n👉 Reply *TEST DRIVE* to schedule a test drive with our sales team\n👉 Reply *FINANCE* to apply for EMI / Loan assistance\n👉 Or reply with another vehicle number or search query!",
+					vYear, vMake, vModel, formatPrice(vPrice), vFuel, vTrans, vKM, vDesc)
+				return card, true, nil
+			}
+		}
+	}
+
+	// 7. Check if user is merely answering the active question
+	if isAnsweringCurrentQuestion(currentQuestion, nlp, body) {
+		return "", false, nil
+	}
+
+	// 8. Instant Search & Inventory Match (Automated Buying)
+	if nlp.HasSearchSignals {
+		updates := map[string]any{}
+		if nlp.Brand != "" {
+			updates["brand"] = nlp.Brand
+			updates["make"] = nlp.Brand
+		}
+		if nlp.Model != "" {
+			updates["model"] = nlp.Model
+		}
+		if nlp.BodyType != "" {
+			updates["vehicle_type"] = nlp.BodyType
+		}
+		if nlp.Fuel != "" {
+			updates["fuel"] = nlp.Fuel
+		}
+		if nlp.Transmission != "" {
+			updates["transmission"] = nlp.Transmission
+		}
+		if nlp.BudgetMax > 0 {
+			updates["budget_max"] = nlp.BudgetMax
+		}
+		if nlp.YearMin > 0 {
+			updates["year_min"] = nlp.YearMin
+		}
+
+		if len(updates) > 0 {
+			_ = e.updateLeadExtractedData(ctx, tx, leadID, updates)
+			for k, v := range updates {
+				data[k] = v
+			}
+		}
+
+		// Try primary match
+		matches, err := MatchVehicles(ctx, tx, leadID, data)
+		if err == nil && len(matches) > 0 {
+			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+			reply := FormatMatches(matches) + "\n\n👉 Reply with vehicle number (e.g. *1*) for full details\n👉 Reply *TEST DRIVE* to schedule a test drive\n👉 Reply *FINANCE* for loan options"
+			return reply, true, nil
+		}
+
+		// Fallback 1: Relax model and search by brand alone
+		if nlp.Brand != "" {
+			brandMatches, err2 := MatchVehicles(ctx, tx, leadID, map[string]any{"brand": nlp.Brand})
+			if err2 == nil && len(brandMatches) > 0 {
+				_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+				leadNote := fmt.Sprintf("🚗 We don't have an exact *%s* in stock right now, but here are our top available *%s* vehicles:\n\n",
+					strings.TrimSpace(nlp.Brand+" "+nlp.Model), nlp.Brand)
+				reply := leadNote + FormatMatches(brandMatches) + "\n\n👉 Reply with vehicle number for details\n👉 Reply *TEST DRIVE* to schedule a test drive\n👉 Reply *FINANCE* for loan options"
+				return reply, true, nil
+			}
+		}
+
+		// Fallback 2: Show top available inventory
+		allMatches, err3 := MatchVehicles(ctx, tx, leadID, map[string]any{})
+		if err3 == nil && len(allMatches) > 0 {
+			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+			leadNote := "🚗 We don't have vehicles matching that exact search in stock right now, but here are our top featured vehicles:\n\n"
+			reply := leadNote + FormatMatches(allMatches) + "\n\n👉 Reply with vehicle number for details\n👉 Reply *TEST DRIVE* to schedule a test drive\n👉 Reply *FINANCE* for loan options"
+			return reply, true, nil
+		}
+	}
+
+	return "", false, nil
 }
 
 // Dummy sql.NullString helper to suppress unused import if needed

@@ -133,29 +133,7 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <section id="s-dash"><h3>Dashboard</h3><div class="cards" id="cards"></div>
 <div class="grid2"><div class="panel"><h4>Needs attention</h4><div id="attention"></div></div>
 <div class="panel"><h4>Latest conversations</h4><div id="recentConv"></div></div></div></section>
-<section id="s-guide"><h3>Guide — where to go</h3>
-<p class="muted">Follow the steps in order. Each button jumps straight to that page.</p>
-<div class="panel"><h4>1 · Connect WhatsApp first</h4>
-<p class="muted small">Nothing flows until the phone is paired. Open WhatsApp, scan the QR, wait for “connected”.</p>
-<div class="row"><button class="primary" onclick="show('wa')">Open WhatsApp →</button></div></div>
-<div class="panel"><h4>2 · Add your vehicles</h4>
-<p class="muted small">Inventory the bot sells from. Sourced vehicles are tracked so reports stay accurate.</p>
-<div class="row"><button class="primary" onclick="show('veh')">Open Vehicles →</button></div></div>
-<div class="panel"><h4>3 · Work leads & chats</h4>
-<p class="muted small">New WhatsApp messages become leads automatically. Chat here, or pause the bot and reply yourself.</p>
-<div class="row"><button class="primary" onclick="show('leads')">Open Leads →</button><button onclick="show('conv')">Open Conversations →</button></div></div>
-<div class="panel"><h4>4 · Test drives & inspections</h4>
-<p class="muted small">Schedule drives for buyers; inspections are booked from sell chats — confirm, reschedule or cancel them here.</p>
-<div class="row"><button class="primary" onclick="show('td')">Open Test Drives →</button><button onclick="show('insp')">Open Inspections →</button></div></div>
-<div class="panel"><h4>5 · Bookings & payments</h4>
-<p class="muted small">Book the car, then the sales team logs each offline payment received (cash / bank / loan) against the booking. No online gateway — cash and transfers only.</p>
-<div class="row"><button class="primary" onclick="show('bk')">Open Bookings →</button><button onclick="show('pay')">Open Payments →</button></div></div>
-<div class="panel"><h4>6 · Money & valuation queues</h4>
-<p class="muted small">Haggle in Negotiations, approve Finance enquiries, accept or reject Sell valuations.</p>
-<div class="row"><button onclick="show('neg')">Negotiations →</button><button onclick="show('fin')">Finance →</button><button onclick="show('sell')">Sell Requests →</button></div></div>
-<div class="panel"><h4>7 · Finish & administer</h4>
-<p class="muted small">Record a review after delivery, manage the team, check Settings — or test the bot with no phone in the Simulator.</p>
-<div class="row"><button onclick="show('rev')">Reviews →</button><button onclick="show('team')">Team →</button><button onclick="show('set')">Settings →</button><button onclick="show('sim')">Simulator →</button></div></div></section>
+
 <section id="s-cust"><h3>Customers</h3>
 <div class="toolbar"><input type="search" id="q_cust" placeholder="Search name / phone…" oninput="loadCust()"/></div>
 <div id="cust"></div></section>
@@ -189,7 +167,7 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <div class="row"><input id="v_make" placeholder="Make*"/><input id="v_model" placeholder="Model*"/><input id="v_year" placeholder="Year" type="number"/><input id="v_price" placeholder="Price Rs" type="number"/><input id="v_fuel" placeholder="Fuel"/><input id="v_trans" placeholder="Transmission"/><input id="v_km" placeholder="KM" type="number"/><input id="v_desc" placeholder="Description" style="min-width:240px"/>
 <select id="v_acq" title="How was this car acquired?"><option value="">Acquired via…</option><option>purchase</option><option>consignment</option><option>other</option></select><button class="primary" onclick="addVehicle()">Add</button></div></div>
 <div class="vgrid" id="veh"></div></section>
-<section id="s-td"><h3>Test drives</h3>
+<section id="s-td"><h3>Test drives <span class="muted small">(Human sales specialist desk)</span></h3>
 <div class="panel"><h4>Schedule</h4><div class="row">
 <input id="td_lead" list="dl_leads" placeholder="Customer / phone…" style="min-width:200px"/>
 <input id="td_veh" list="dl_veh" placeholder="Vehicle…" style="min-width:200px"/>
@@ -227,10 +205,10 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <input id="ng_co" placeholder="Customer offer" type="number"/><input id="ng_so" placeholder="Sales offer" type="number"/><input id="ng_fp" placeholder="Final price" type="number"/>
 <button class="primary" onclick="addNG()">Save</button></div></div>
 <div id="neg"></div></section>
-<section id="s-fin"><h3>Finance enquiries <span class="muted small">(information only — no payment gateway)</span></h3><div id="fin"></div></section>
+<section id="s-fin"><h3>Finance enquiries <span class="muted small">(Human finance desk · loan applications)</span></h3><div id="fin"></div></section>
 <section id="s-sell">
 <div class="row" style="justify-content:space-between;align-items:center;margin-top:0">
-  <h3 style="margin:0">Sell requests <span class="muted small">(valuation queue)</span></h3>
+  <h3 style="margin:0">Sell requests <span class="muted small">(100% automated valuation & auto-listing)</span></h3>
   <div class="row" style="margin:0;gap:8px">
     <span class="pill p-green" title="Vehicle review, valuation, and inventory listing run automatically">⚡ Auto-Review Active</span>
     <button class="small primary" onclick="autoReviewSellRequests()">⚡ Auto-Review All Pending</button>

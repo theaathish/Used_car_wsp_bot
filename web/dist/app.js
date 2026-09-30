@@ -56,9 +56,21 @@ function login() {
 function logout() { localStorage.removeItem('token'); location.reload(); }
 
 /* ---------- nav ---------- */
-const NAV = [['dash', 'Dashboard'], ['guide', 'Guide'], ['wa', 'WhatsApp'], ['cust', 'Customers'], ['leads', 'Leads'], ['conv', 'Conversations'], ['veh', 'Vehicles'],
-  ['td', 'Test Drives'], ['insp', 'Inspections'], ['fu', 'Follow-ups'], ['bk', 'Bookings'], ['pay', 'Payments'], ['neg', 'Negotiations'], ['fin', 'Finance'],
-  ['sell', 'Sell Requests'], ['rev', 'Reviews'], ['bot', 'Bot Config'], ['team', 'Team'], ['set', 'Settings'], ['sim', 'Simulator']];
+const NAV = [
+  ['dash', 'Dashboard'],
+  ['conv', 'Conversations'],
+  ['leads', 'Leads'],
+  ['veh', 'Inventory (Cars)'],
+  ['sell', 'Sell Requests (Auto)'],
+  ['td', 'Test Drives (Human)'],
+  ['fin', 'Finance (Human)'],
+  ['pay', 'Payments'],
+  ['bot', 'Bot Config'],
+  ['sim', 'Simulator'],
+  ['wa', 'WhatsApp'],
+  ['team', 'Team'],
+  ['set', 'Settings']
+];
 function buildNav() {
   document.getElementById('nav').innerHTML = NAV.filter(function (n) { return (n[0] !== 'team' && n[0] !== 'bot') || ME.role === 'admin'; })
     .map(function (n) { return '<button id="nav-' + n[0] + '" onclick="show(\'' + n[0] + '\')"><span class="t">' + n[1] + '</span><span class="n" id="badge-' + n[0] + '"></span></button>'; }).join('');
@@ -134,7 +146,7 @@ async function refreshHealth() {
 async function dash() {
   const r = await api('GET', '/api/dashboard'); if (!r.ok) return;
   const j = r.data;
-  const cards = [['leads', 'Leads', 'leads'], ['available_vehicles', 'Vehicles', 'veh'], ['scheduled_test_drives', 'Test drives', 'td'], ['pending_followups', 'Follow-ups', 'fu'], ['open_bookings', 'Bookings', 'bk']];
+  const cards = [['leads', 'Active Leads', 'leads'], ['available_vehicles', 'Inventory Cars', 'veh'], ['scheduled_test_drives', 'Test Drives (Human)', 'td']];
   document.getElementById('cards').innerHTML = cards.map(function (c) {
     return '<div class="card" onclick="show(\'' + c[2] + '\')"><div class="l">' + c[1] + '</div><b>' + (j[c[0]] || 0) + '</b></div>';
   }).join('');
@@ -145,10 +157,12 @@ async function dash() {
   const val = (sell.ok ? sell.data : []).filter(function (s) { return s.status === 'VALUATION_PENDING'; });
   const upcoming = (td.ok ? td.data : []).filter(function (t) { return t.status === 'SCHEDULED'; }).slice(0, 5);
   const inspUp = (insp.ok ? insp.data : []).filter(function (t) { return t.status === 'SCHEDULED'; }).slice(0, 5);
-  document.getElementById('badge-fu').textContent = pend.length || '';
-  document.getElementById('badge-sell').textContent = val.length || '';
-  document.getElementById('badge-insp').textContent = inspUp.length || '';
-  document.getElementById('badge-leads').textContent = j.leads || '';
+  const setBadge = function (id, txt) { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  setBadge('badge-fu', pend.length || '');
+  setBadge('badge-sell', val.length || '');
+  setBadge('badge-insp', inspUp.length || '');
+  setBadge('badge-leads', j.leads || '');
+  setBadge('badge-td', upcoming.length || '');
   if (!pend.length && !val.length && !upcoming.length && !inspUp.length) att = '<div class="empty">All clear — nothing waiting.</div>';
   att += pend.map(function (f) { return '<div>• Follow-up for <b>' + esc(f.phone) + '</b> — ' + esc(f.type) + ' <span class="muted small">' + fmtDate(f.scheduled_at) + '</span></div>'; }).join('');
   att += val.map(function (s) { return '<div>• Valuation: <b>' + esc(s.brand) + ' ' + esc(s.model) + '</b> (' + esc(s.phone) + ')</div>'; }).join('');
