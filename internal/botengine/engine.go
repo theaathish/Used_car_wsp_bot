@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -397,17 +398,108 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 
 	reply := e.GetResponse(ctx, "flow_complete")
 
+	// Check if this flow is a Sell Car flow (or extracted data contains car sell fields)
+	var flowSlug string
+	if flowID != nil && *flowID != "" {
+		_ = tx.QueryRow(ctx, `SELECT slug FROM bot_flows WHERE id=$1`, *flowID).Scan(&flowSlug)
+	}
+
+	var extracted map[string]any
+	var rawData []byte
+	if leadID != "" {
+		_ = tx.QueryRow(ctx, `SELECT extracted_data FROM leads WHERE id=$1`, leadID).Scan(&rawData)
+		if len(rawData) > 0 {
+			_ = json.Unmarshal(rawData, &extracted)
+		}
+	}
+
+	isSellFlow := flowSlug == "sell_flow"
+	if !isSellFlow && extracted != nil {
+		_, hasBrand := getString(extracted, "sell_brand")
+		_, hasModel := getString(extracted, "sell_model")
+		if hasBrand && hasModel {
+			isSellFlow = true
+		}
+	}
+
+	if isSellFlow && extracted != nil && leadID != "" {
+		brand, _ := getString(extracted, "sell_brand")
+		if brand == "" {
+			brand, _ = getString(extracted, "brand")
+		}
+		model, _ := getString(extracted, "sell_model")
+		if model == "" {
+			model, _ = getString(extracted, "model")
+		}
+		yearNum, _ := getNumber(extracted, "sell_year")
+		if yearNum == 0 {
+			yearNum, _ = getNumber(extracted, "year")
+		}
+		kmNum, _ := getNumber(extracted, "sell_km")
+		if kmNum == 0 {
+			kmNum, _ = getNumber(extracted, "km")
+		}
+		fuel, _ := getString(extracted, "sell_fuel")
+		if fuel == "" {
+			fuel, _ = getString(extracted, "fuel")
+		}
+		trans, _ := getString(extracted, "sell_transmission")
+		if trans == "" {
+			trans, _ = getString(extracted, "transmission")
+		}
+		cond, _ := getString(extracted, "sell_condition")
+		if cond == "" {
+			cond, _ = getString(extracted, "condition")
+		}
+		loc, _ := getString(extracted, "sell_location")
+		if loc == "" {
+			loc, _ = getString(extracted, "location")
+		}
+		reg, _ := getString(extracted, "sell_reg")
+		if reg == "" {
+			reg, _ = getString(extracted, "registration")
+		}
+		expPrice, _ := getNumber(extracted, "expected_price")
+
+		if brand != "" && model != "" {
+			sID := uuid.NewString()
+			vID := uuid.NewString()
+			valPrice := EstimateVehicleValuation(brand, model, int(yearNum), int(kmNum), cond, int(expPrice))
+
+			// 1. Insert sell_requests as ACCEPTED
+			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, registration, km, fuel, transmission, condition, location, status)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ACCEPTED')`,
+				sID, leadID, brand, model, int(yearNum), reg, int(kmNum), fuel, trans, cond, loc)
+
+			// 2. Insert into vehicles inventory as AVAILABLE
+			desc := strings.TrimSpace(cond + " " + loc + " " + reg)
+			if desc == "" {
+				desc = "Verified pre-owned vehicle (auto-reviewed)"
+			}
+			_, _ = tx.Exec(ctx, `INSERT INTO vehicles (id, make, model, year, price, fuel, transmission, km, status, description, acquired_via)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'AVAILABLE', $9, 'customer_sell')`,
+				vID, brand, model, int(yearNum), valPrice, fuel, trans, int(kmNum), desc)
+
+			// 3. Link customer photos from this conversation
+			_, _ = tx.Exec(ctx, `INSERT INTO vehicle_images(vehicle_id, path, sort_order)
+				SELECT $1, m.media_path, row_number() over ()
+				FROM messages m WHERE m.conversation_id = $2 AND m.media_path <> ''`,
+				vID, convID)
+
+			// 4. Update lead status
+			_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', updated_at=now() WHERE id=$1`, leadID)
+
+			// 5. Tailored completion message with automated valuation
+			reply = fmt.Sprintf("🎉 *Vehicle Review Complete!*\n\nYour %d %s %s has been automatically evaluated and accepted into our inventory!\n\n📋 *Estimated Valuation*: ₹%s\n📍 *Status*: Verified & Listed as Available\n\nOur sales specialist will contact you shortly to coordinate vehicle inspection and paperwork.", int(yearNum), brand, model, FormatPrice(valPrice))
+			return reply, nil
+		}
+	}
+
 	// Check if this flow triggers vehicle matching
 	if flowID != nil && *flowID != "" && leadID != "" {
 		var triggerMatching bool
 		err := tx.QueryRow(ctx, `SELECT trigger_matching FROM bot_flows WHERE id=$1`, *flowID).Scan(&triggerMatching)
 		if err == nil && triggerMatching {
-			var extracted map[string]any
-			var rawData []byte
-			_ = tx.QueryRow(ctx, `SELECT extracted_data FROM leads WHERE id=$1`, leadID).Scan(&rawData)
-			if len(rawData) > 0 {
-				_ = json.Unmarshal(rawData, &extracted)
-			}
 			if e.matcher != nil {
 				matchMsg, err := e.matcher(ctx, tx, leadID, extracted)
 				if err == nil && strings.TrimSpace(matchMsg) != "" {

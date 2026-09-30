@@ -1412,6 +1412,44 @@ func (w *Worker) HandleInbound(ctx context.Context, phone, name, body string, wa
 	}
 
 	var reply string
+
+	// Check if this inbound message is a response to an automated review prompt
+	var isReviewPromptSent bool
+	_ = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM followups WHERE lead_id=$1 AND type='review_prompt')`, leadID).Scan(&isReviewPromptSent)
+	if isReviewPromptSent {
+		tb := norm(body)
+		rating := 0
+		switch {
+		case strings.HasPrefix(tb, "5") || strings.Contains(tb, "5 star") || strings.Contains(tb, "five"):
+			rating = 5
+		case strings.HasPrefix(tb, "4") || strings.Contains(tb, "4 star") || strings.Contains(tb, "four"):
+			rating = 4
+		case strings.HasPrefix(tb, "3") || strings.Contains(tb, "3 star") || strings.Contains(tb, "three"):
+			rating = 3
+		case strings.HasPrefix(tb, "2") || strings.Contains(tb, "2 star") || strings.Contains(tb, "two"):
+			rating = 2
+		case strings.HasPrefix(tb, "1") || strings.Contains(tb, "1 star") || strings.Contains(tb, "one"):
+			rating = 1
+		}
+		if rating > 0 {
+			var bkID string
+			_ = tx.QueryRow(ctx, `SELECT b.id::text FROM bookings b WHERE b.lead_id=$1 ORDER BY b.created_at DESC LIMIT 1`, leadID).Scan(&bkID)
+			if bkID != "" {
+				_, _ = tx.Exec(ctx, `INSERT INTO reviews(id, booking_id, rating, review, referral_source)
+					VALUES(gen_random_uuid(), $1, $2, $3, 'whatsapp')`, bkID, rating, strings.TrimSpace(body))
+				_, _ = tx.Exec(ctx, `DELETE FROM followups WHERE lead_id=$1 AND type='review_prompt'`, leadID)
+				reply = "⭐ Thank you so much for your rating and review! We truly appreciate your feedback and look forward to serving you again."
+				if _, err := tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, reply); err != nil {
+					return "", err
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return "", err
+				}
+				return reply, nil
+			}
+		}
+	}
+
 	if w.Engine != nil {
 		tb := norm(body)
 		if freshSession || isGreetingOnly(body) || tb == "start again" || tb == "restart" || tb == "menu" || tb == "main menu" || tb == "hi menu" {

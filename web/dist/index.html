@@ -228,8 +228,21 @@ img.qr{background:#fff;padding:8px;border-radius:8px;border:1px solid var(--line
 <button class="primary" onclick="addNG()">Save</button></div></div>
 <div id="neg"></div></section>
 <section id="s-fin"><h3>Finance enquiries <span class="muted small">(information only — no payment gateway)</span></h3><div id="fin"></div></section>
-<section id="s-sell"><h3>Sell requests <span class="muted small">(valuation queue)</span></h3><div id="sell"></div></section>
-<section id="s-rev"><h3>Reviews & referrals</h3>
+<section id="s-sell">
+<div class="row" style="justify-content:space-between;align-items:center;margin-top:0">
+  <h3 style="margin:0">Sell requests <span class="muted small">(valuation queue)</span></h3>
+  <div class="row" style="margin:0;gap:8px">
+    <span class="pill p-green" title="Vehicle review, valuation, and inventory listing run automatically">⚡ Auto-Review Active</span>
+    <button class="small primary" onclick="autoReviewSellRequests()">⚡ Auto-Review All Pending</button>
+  </div>
+</div>
+<div id="sell"></div>
+</section>
+<section id="s-rev">
+<div class="row" style="justify-content:space-between;align-items:center;margin-top:0">
+  <h3 style="margin:0">Reviews & referrals</h3>
+  <span class="pill p-green" title="Customer review collection is automated via WhatsApp">⚡ Auto-Feedback Active</span>
+</div>
 <div class="panel"><h4>Record review</h4><div class="row">
 <input id="rv_bk" placeholder="Booking (customer / vehicle…)" list="dl_bk" style="min-width:220px"/>
 <input id="rv_rate" placeholder="Rating 1–5" type="number" min="1" max="5"/><input id="rv_txt" placeholder="Review" style="min-width:240px"/>

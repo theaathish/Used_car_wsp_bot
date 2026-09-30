@@ -205,3 +205,44 @@ func TestSimulateEndpoint(t *testing.T) {
 		t.Fatalf("expected welcome or entry question, got %q", reply)
 	}
 }
+
+func TestSellRequests_AutoReview(t *testing.T) {
+	srv, token, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	handler := srv.Router(http.Dir(t.TempDir()))
+
+	// Create test customer & lead
+	custID := "44444444-4444-4444-4444-444444444441"
+	leadID := "44444444-4444-4444-4444-444444444442"
+	sellID := "44444444-4444-4444-4444-444444444443"
+
+	_, _ = srv.Pool.Exec(ctx, `INSERT INTO customers(id, name, phone, source) VALUES($1, 'Auto Tester', '9876543210', 'whatsapp') ON CONFLICT DO NOTHING`, custID)
+	_, _ = srv.Pool.Exec(ctx, `INSERT INTO leads(id, customer_id, intent, status, state, source) VALUES($1, $2, 'SELL', 'QUALIFIED', 'DONE', 'whatsapp') ON CONFLICT DO NOTHING`, leadID, custID)
+	_, _ = srv.Pool.Exec(ctx, `INSERT INTO sell_requests(id, lead_id, brand, model, year, registration, km, fuel, transmission, condition, location, status)
+		VALUES($1, $2, 'Honda', 'City', 2021, 'MH01AA9999', 32000, 'Petrol', 'Automatic', 'Excellent', 'Mumbai', 'VALUATION_PENDING')
+		ON CONFLICT (id) DO UPDATE SET status='VALUATION_PENDING'`, sellID, leadID)
+
+	req := httptest.NewRequest("POST", "/api/sell-requests/auto-review", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auto-review status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var status string
+	err := srv.Pool.QueryRow(ctx, `SELECT status FROM sell_requests WHERE id=$1`, sellID).Scan(&status)
+	if err != nil || status != "ACCEPTED" {
+		t.Fatalf("expected status ACCEPTED, got %s, err: %v", status, err)
+	}
+
+	var vehCount int
+	_ = srv.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM vehicles WHERE make='Honda' AND model='City' AND acquired_via='customer_sell' AND status='AVAILABLE'`).Scan(&vehCount)
+	if vehCount == 0 {
+		t.Fatalf("expected vehicle created in vehicles inventory with AVAILABLE and customer_sell")
+	}
+}
+

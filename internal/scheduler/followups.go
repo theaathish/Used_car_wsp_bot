@@ -2,10 +2,14 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"sellingbot/internal/botengine"
 	"sellingbot/internal/whatsapp"
 )
 
@@ -25,6 +29,10 @@ func Followups(ctx context.Context, pool *pgxpool.Pool, w *whatsapp.Worker) {
 			remindTestDrives(ctx, pool, w)
 			postTestDriveFollowups(ctx, pool, w)
 			remindInspections(ctx, pool, w)
+			autoCompleteInspections(ctx, pool)
+			autoReviewSellRequests(ctx, pool, w)
+			autoReviewFinanceRequests(ctx, pool, w)
+			autoPromptReviews(ctx, pool, w)
 			w.FlushOutbox(ctx)
 		}
 	}
@@ -244,5 +252,181 @@ func remindInspections(ctx context.Context, pool *pgxpool.Pool, w *whatsapp.Work
 			continue
 		}
 		_, _ = pool.Exec(c, `UPDATE followups SET status='sent' WHERE type=$1 AND message=$2`, kind, marker)
+	}
+}
+
+// autoCompleteInspections marks past scheduled inspections as COMPLETED (2h buffer past scheduled_at).
+func autoCompleteInspections(ctx context.Context, pool *pgxpool.Pool) {
+	c, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	_, _ = pool.Exec(c, `UPDATE inspections SET status='COMPLETED' WHERE status='SCHEDULED' AND scheduled_at < now() - interval '2 hours'`)
+}
+
+// autoReviewSellRequests automatically evaluates pending sell requests, calculates valuation,
+// adds them into inventory as AVAILABLE with linked images, marks status as ACCEPTED, and alerts the customer.
+func autoReviewSellRequests(ctx context.Context, pool *pgxpool.Pool, w *whatsapp.Worker) {
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	rows, err := pool.Query(c, `SELECT s.id::text, s.lead_id::text, cu.phone, s.brand, s.model, s.year, s.registration, s.km, s.fuel, s.transmission, s.condition, s.location
+		FROM sell_requests s JOIN leads l ON l.id=s.lead_id
+		JOIN customers cu ON cu.id=l.customer_id
+		WHERE s.status='VALUATION_PENDING' LIMIT 10`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type sr struct {
+		id, leadID, phone, brand, model, reg, fuel, trans, cond, loc string
+		year, km                                                     int
+	}
+	var items []sr
+	for rows.Next() {
+		var it sr
+		if err := rows.Scan(&it.id, &it.leadID, &it.phone, &it.brand, &it.model, &it.year, &it.reg, &it.km, &it.fuel, &it.trans, &it.cond, &it.loc); err == nil {
+			items = append(items, it)
+		}
+	}
+	rows.Close()
+
+	for _, it := range items {
+		price := botengine.EstimateVehicleValuation(it.brand, it.model, it.year, it.km, it.cond, 0)
+		vid := uuid.NewString()
+		desc := strings.TrimSpace(it.cond + " " + it.loc + " " + it.reg)
+		if desc == "" {
+			desc = "Verified pre-owned vehicle (auto-reviewed)"
+		}
+
+		tx, err := pool.Begin(c)
+		if err != nil {
+			continue
+		}
+
+		if _, err := tx.Exec(c, `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description,acquired_via)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,'AVAILABLE',$9,'customer_sell')`,
+			vid, it.brand, it.model, it.year, price, it.fuel, it.trans, it.km, desc); err != nil {
+			_ = tx.Rollback(c)
+			continue
+		}
+
+		// Link photos
+		pRows, err := tx.Query(c, `SELECT DISTINCT m.media_path FROM messages m
+			JOIN conversations conv ON conv.id=m.conversation_id
+			WHERE conv.lead_id=$1 AND m.media_path<>'' ORDER BY m.media_path`, it.leadID)
+		if err == nil {
+			var photoPaths []string
+			for pRows.Next() {
+				var mp string
+				if err := pRows.Scan(&mp); err == nil {
+					photoPaths = append(photoPaths, mp)
+				}
+			}
+			pRows.Close()
+			for n, mp := range photoPaths {
+				_, _ = tx.Exec(c, `INSERT INTO vehicle_images(vehicle_id,path,sort_order) VALUES($1,$2,$3)`, vid, mp, n)
+			}
+		}
+
+		if _, err := tx.Exec(c, `UPDATE sell_requests SET status='ACCEPTED' WHERE id=$1`, it.id); err != nil {
+			_ = tx.Rollback(c)
+			continue
+		}
+
+		if err := tx.Commit(c); err == nil {
+			if w != nil && it.phone != "" {
+				msg := fmt.Sprintf("🎉 Vehicle Review Complete: Your %d %s %s has been automatically evaluated and accepted! Estimated valuation: ₹%s. It is now listed in our inventory.", it.year, it.brand, it.model, botengine.FormatPrice(price))
+				_ = w.Send(c, it.phone, msg)
+			}
+		}
+	}
+}
+
+// autoReviewFinanceRequests evaluates pending finance requests and automatically pre-approves qualified applicants.
+func autoReviewFinanceRequests(ctx context.Context, pool *pgxpool.Pool, w *whatsapp.Worker) {
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	rows, err := pool.Query(c, `SELECT f.id::text, cu.phone, f.loan_amount, f.income
+		FROM finance_requests f JOIN leads l ON l.id=f.lead_id
+		JOIN customers cu ON cu.id=l.customer_id
+		WHERE f.status='NEW' LIMIT 10`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type fin struct {
+		id, phone          string
+		loanAmount, income int
+	}
+	var items []fin
+	for rows.Next() {
+		var it fin
+		if err := rows.Scan(&it.id, &it.phone, &it.loanAmount, &it.income); err == nil {
+			items = append(items, it)
+		}
+	}
+	rows.Close()
+
+	for _, it := range items {
+		// Auto pre-approval criteria: income * 36 >= loan or reasonable loan size
+		if it.loanAmount > 0 && it.income > 0 && (it.income*36 >= it.loanAmount || it.loanAmount <= 1500000) {
+			tag, err := pool.Exec(c, `UPDATE finance_requests SET status='PRE_APPROVED' WHERE id=$1 AND status='NEW'`, it.id)
+			if err == nil && tag.RowsAffected() > 0 {
+				if w != nil && it.phone != "" {
+					msg := fmt.Sprintf("🎉 Finance Pre-Approval: Your application for ₹%s has been automatically pre-approved. Our financing specialist will contact you shortly to collect paperwork.", botengine.FormatPrice(it.loanAmount))
+					_ = w.Send(c, it.phone, msg)
+				}
+			}
+		}
+	}
+}
+
+// autoPromptReviews requests feedback for customers whose test drive or delivery completed > 1h ago,
+// unless already reviewed or prompted.
+func autoPromptReviews(ctx context.Context, pool *pgxpool.Pool, w *whatsapp.Worker) {
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	rows, err := pool.Query(c, `SELECT t.id::text, t.lead_id::text, cu.phone, v.make, v.model
+		FROM test_drives t JOIN leads l ON l.id=t.lead_id
+		JOIN customers cu ON cu.id=l.customer_id JOIN vehicles v ON v.id=t.vehicle_id
+		WHERE t.status='COMPLETED' AND t.scheduled_at < now() - interval '1 hour'
+		AND NOT EXISTS (SELECT 1 FROM followups f WHERE f.type='review_prompt' AND f.lead_id=t.lead_id)
+		LIMIT 10`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type tdRev struct {
+		id, leadID, phone, make, model string
+	}
+	var items []tdRev
+	for rows.Next() {
+		var it tdRev
+		if err := rows.Scan(&it.id, &it.leadID, &it.phone, &it.make, &it.model); err == nil {
+			items = append(items, it)
+		}
+	}
+	rows.Close()
+
+	for _, it := range items {
+		if it.phone == "" {
+			continue
+		}
+		msg := fmt.Sprintf("🌟 Thank you for test driving the %s %s! How was your experience? Reply with a rating (1 to 5 stars) and a short review.", it.make, it.model)
+		marker := "[" + it.id + "] " + msg
+		tag, err := pool.Exec(c, `INSERT INTO followups(lead_id, type, scheduled_at, status, message)
+			SELECT $1, 'review_prompt', now(), 'sending', $2
+			WHERE NOT EXISTS (SELECT 1 FROM followups WHERE type='review_prompt' AND lead_id=$1)`, it.leadID, marker)
+		if err != nil || tag.RowsAffected() == 0 {
+			continue
+		}
+		if w != nil {
+			_ = w.Send(c, it.phone, msg)
+		}
+		_, _ = pool.Exec(c, `UPDATE followups SET status='sent' WHERE type='review_prompt' AND message=$1`, marker)
 	}
 }

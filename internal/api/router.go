@@ -210,6 +210,8 @@ func (s *Server) authedRoutes(w http.ResponseWriter, r *http.Request) {
 		s.createFinance(w, r)
 	case p == "/api/sell-requests" && r.Method == "GET":
 		s.listSellRequests(w, r)
+	case p == "/api/sell-requests/auto-review" && r.Method == "POST":
+		s.autoReviewSellRequestsHandler(w, r)
 	case strings.HasPrefix(p, "/api/sell-requests/") && strings.HasSuffix(p, "/accept") && r.Method == "POST":
 		s.acceptSell(w, r)
 	case strings.HasPrefix(p, "/api/sell-requests/") && strings.HasSuffix(p, "/reject") && r.Method == "POST":

@@ -525,6 +525,21 @@ async function loadSELL() {
       return '<tr><td>' + esc(o.phone) + '<br/>' + sid(o.id) + '</td><td><b>' + esc(o.brand) + ' ' + esc(o.model) + '</b><br/><span class="muted small">' + esc(o.fuel) + ' · ' + esc(o.transmission) + ' · ' + esc(o.condition) + ' · ' + esc(o.location) + '</span></td><td>' + esc(o.year) + '</td><td>' + Number(o.km || 0).toLocaleString('en-IN') + '</td><td class="small">' + esc(o.registration) + '</td><td>' + esc(o.photo_count) + '</td><td>' + pill(o.status) + '</td><td>' + act + '</td></tr>';
     }).join('') + '</table>' : '<div class="empty">No sell requests.</div>';
 }
+async function autoReviewSellRequests() {
+  const r = await api('POST', '/api/sell-requests/auto-review');
+  if (r.ok) {
+    const count = r.reviewed_count || 0;
+    if (count > 0) {
+      toast(count + ' vehicle(s) reviewed and accepted into inventory!');
+    } else {
+      toast('No pending sell requests to review');
+    }
+    loadSELL();
+    if (typeof loadVehicles === 'function') loadVehicles();
+  } else {
+    toast(r.error || 'Auto-review failed', 'err');
+  }
+}
 async function loadRV() {
   const r = await api('GET', '/api/reviews'); if (!r.ok) return;
   document.getElementById('rev').innerHTML = r.data.length ? '<table><tr><th>Customer</th><th>Rating</th><th>Review</th><th></th></tr>' +

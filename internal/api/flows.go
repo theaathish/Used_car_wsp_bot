@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -9,7 +10,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"sellingbot/internal/auth"
+	"sellingbot/internal/botengine"
 	"sellingbot/internal/whatsapp"
 )
 
@@ -441,6 +444,99 @@ func (s *Server) listSellRequests(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{"id": id, "phone": phone, "brand": brand, "model": model, "year": year, "registration": reg, "km": km, "fuel": fuel, "transmission": trans, "condition": cond, "location": loc, "photo_count": photos, "status": status})
 	}
 	writeJSON(w, out)
+}
+
+// POST /api/sell-requests/auto-review — automatically reviews and values all pending sell requests
+func (s *Server) autoReviewSellRequestsHandler(w http.ResponseWriter, r *http.Request) {
+	count, err := AutoReviewPendingSellRequests(r.Context(), s.Pool)
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, 500)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "reviewed_count": count})
+}
+
+// AutoReviewPendingSellRequests automatically evaluates all VALUATION_PENDING sell requests,
+// assigns market valuation, adds them into available vehicles inventory, and marks status as ACCEPTED.
+func AutoReviewPendingSellRequests(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	rows, err := pool.Query(ctx, `SELECT s.id::text, s.lead_id::text, s.brand, s.model, s.year, s.registration, s.km, s.fuel, s.transmission, s.condition, s.location
+		FROM sell_requests s
+		WHERE s.status='VALUATION_PENDING' FOR UPDATE SKIP LOCKED`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type sr struct {
+		id, leadID, brand, model, reg, fuel, trans, cond, loc string
+		year, km                                              int
+	}
+	var pending []sr
+	for rows.Next() {
+		var it sr
+		if err := rows.Scan(&it.id, &it.leadID, &it.brand, &it.model, &it.year, &it.reg, &it.km, &it.fuel, &it.trans, &it.cond, &it.loc); err == nil {
+			pending = append(pending, it)
+		}
+	}
+	rows.Close()
+
+	count := 0
+	for _, it := range pending {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			continue
+		}
+		price := botengine.EstimateVehicleValuation(it.brand, it.model, it.year, it.km, it.cond, 0)
+		vid := uuid.NewString()
+		desc := strings.TrimSpace(it.cond + " " + it.loc + " " + it.reg)
+		if desc == "" {
+			desc = "Verified pre-owned vehicle (auto-reviewed)"
+		}
+
+		if _, err := tx.Exec(ctx, `INSERT INTO vehicles(id,make,model,year,price,fuel,transmission,km,status,description,acquired_via)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,'AVAILABLE',$9,'customer_sell')`,
+			vid, it.brand, it.model, it.year, price, it.fuel, it.trans, it.km, desc); err != nil {
+			_ = tx.Rollback(ctx)
+			continue
+		}
+
+		// Link photos
+		pRows, err := tx.Query(ctx, `SELECT DISTINCT m.media_path FROM messages m
+			JOIN conversations c ON c.id=m.conversation_id
+			WHERE c.lead_id=$1 AND m.media_path<>'' ORDER BY m.media_path`, it.leadID)
+		if err == nil {
+			var photoPaths []string
+			for pRows.Next() {
+				var mp string
+				if err := pRows.Scan(&mp); err == nil {
+					photoPaths = append(photoPaths, mp)
+				}
+			}
+			pRows.Close()
+			for n, mp := range photoPaths {
+				_, _ = tx.Exec(ctx, `INSERT INTO vehicle_images(vehicle_id,path,sort_order) VALUES($1,$2,$3)`, vid, mp, n)
+			}
+		}
+
+		if _, err := tx.Exec(ctx, `UPDATE sell_requests SET status='ACCEPTED' WHERE id=$1`, it.id); err != nil {
+			_ = tx.Rollback(ctx)
+			continue
+		}
+
+		var phone string
+		_ = tx.QueryRow(ctx, `SELECT c.phone FROM leads l JOIN customers c ON c.id=l.customer_id WHERE l.id=$1`, it.leadID).Scan(&phone)
+		if phone != "" {
+			msg := fmt.Sprintf("🎉 Vehicle Review Complete: Your %d %s %s has been automatically evaluated and accepted! Estimated valuation: ₹%s. It is now listed in our inventory.", it.year, it.brand, it.model, botengine.FormatPrice(price))
+			_, _ = tx.Exec(ctx, `INSERT INTO followups(lead_id, type, scheduled_at, status, message)
+				VALUES($1, 'sell_accepted_notification', now(), 'pending', $2)`, it.leadID, msg)
+		}
+
+		if err := tx.Commit(ctx); err == nil {
+			audit(ctx, pool, "system.automation", "sell.auto_accept", "sell_request", it.id, "VALUATION_PENDING", "ACCEPTED")
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
