@@ -711,8 +711,35 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 	}
 
 	// 5. Automated Selling Flow
-	if nlp.Intent == IntentSell || nlp.HasSellSignals {
-		data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+	data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+	isSellMode := false
+	if sm, ok := getString(data, "sell_mode"); ok && (sm == "true" || sm == "1") {
+		isSellMode = true
+	}
+	if leadID != "" && !isSellMode {
+		var currentIntent string
+		_ = tx.QueryRow(ctx, `SELECT intent FROM leads WHERE id=$1`, leadID).Scan(&currentIntent)
+		if currentIntent == "SELL" {
+			isSellMode = true
+		}
+	}
+
+	// Check if user explicitly switches from sell mode to buy
+	lowerBody := strings.ToLower(body)
+	explicitBuy := strings.Contains(lowerBody, "buy") ||
+		strings.Contains(lowerBody, "purchase") ||
+		strings.Contains(lowerBody, "browse") ||
+		strings.Contains(lowerBody, "looking to buy") ||
+		strings.Contains(lowerBody, "want to buy")
+
+	if isSellMode && explicitBuy {
+		isSellMode = false
+		if leadID != "" {
+			_, _ = tx.Exec(ctx, `UPDATE leads SET intent='BUY', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
+		}
+	}
+
+	if nlp.Intent == IntentSell || nlp.HasSellSignals || isSellMode {
 		brand := nlp.Brand
 		model := nlp.Model
 		if brand == "" {
@@ -722,19 +749,20 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			model, _ = getString(data, "sell_model")
 		}
 
+		year := nlp.YearMin
+		if year == 0 {
+			yNum, _ := getNumber(data, "sell_year")
+			year = int(yNum)
+		}
+		km := nlp.KM
+		if km == 0 {
+			kNum, _ := getNumber(data, "sell_km")
+			km = int(kNum)
+		}
+
 		if brand != "" && model != "" {
-			year := nlp.YearMin
-			if year == 0 {
-				yNum, _ := getNumber(data, "sell_year")
-				year = int(yNum)
-			}
 			if year == 0 {
 				year = 2020
-			}
-			km := nlp.KM
-			if km == 0 {
-				kNum, _ := getNumber(data, "sell_km")
-				km = int(kNum)
 			}
 			if km == 0 {
 				km = 35000
@@ -768,7 +796,7 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 				vID, brand, model, year, valPrice, fuel, trans, km, desc)
 
 			if leadID != "" {
-				_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', updated_at=now() WHERE id=$1`, leadID)
+				_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
 			}
 			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
 
@@ -777,11 +805,31 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			return reply, true, nil
 		}
 
+		// Save sell_mode and whatever partial fields are provided
+		updates := map[string]any{"sell_mode": "true"}
+		if brand != "" {
+			updates["sell_brand"] = brand
+		}
+		if model != "" {
+			updates["sell_model"] = model
+		}
+		if year > 0 {
+			updates["sell_year"] = year
+		}
+		if km > 0 {
+			updates["sell_km"] = km
+		}
+		if leadID != "" {
+			_ = e.updateLeadExtractedData(ctx, tx, leadID, updates)
+			_, _ = tx.Exec(ctx, `UPDATE leads SET intent='SELL', updated_at=now() WHERE id=$1`, leadID)
+		}
+		_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+
 		return "🚗 *Sell Your Car Instantly!*\n\nPlease tell us your car's Brand, Model, Manufacturing Year, and approximate Mileage (e.g. *\"2019 Honda City, 45,000 km\"*).\n\nWe will evaluate your car automatically and list it in our inventory!", true, nil
 	}
 
 	// 6. Direct Vehicle Selection (#1, #2, etc.)
-	data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+	data, _ = e.loadLeadExtractedData(ctx, tx, leadID)
 	matchIDsStr, hasMatches := getString(data, "match_ids")
 
 	if nlp.SelectionIndex > 0 && hasMatches && matchIDsStr != "" {
@@ -844,8 +892,7 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		matches, err := MatchVehicles(ctx, tx, leadID, data)
 		if err == nil && len(matches) > 0 {
 			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
-			reply := FormatMatches(matches) + "\n\n👉 Reply with vehicle number (e.g. *1*) for full details\n👉 Reply *TEST DRIVE* to schedule a test drive\n👉 Reply *FINANCE* for loan options"
-			return reply, true, nil
+			return FormatMatches(matches), true, nil
 		}
 
 		// Fallback 1: Relax model and search by brand alone
@@ -853,10 +900,9 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			brandMatches, err2 := MatchVehicles(ctx, tx, leadID, map[string]any{"brand": nlp.Brand})
 			if err2 == nil && len(brandMatches) > 0 {
 				_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
-				leadNote := fmt.Sprintf("🚗 We don't have an exact *%s* in stock right now, but here are our top available *%s* vehicles:\n\n",
+				leadNote := fmt.Sprintf("🚗 We don't have an exact *%s* in stock right now, but here are our top available *%s* vehicles:",
 					strings.TrimSpace(nlp.Brand+" "+nlp.Model), nlp.Brand)
-				reply := leadNote + FormatMatches(brandMatches) + "\n\n👉 Reply with vehicle number for details\n👉 Reply *TEST DRIVE* to schedule a test drive\n👉 Reply *FINANCE* for loan options"
-				return reply, true, nil
+				return FormatMatchesWithHeader(brandMatches, leadNote), true, nil
 			}
 		}
 
@@ -864,9 +910,8 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		allMatches, err3 := MatchVehicles(ctx, tx, leadID, map[string]any{})
 		if err3 == nil && len(allMatches) > 0 {
 			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
-			leadNote := "🚗 We don't have vehicles matching that exact search in stock right now, but here are our top featured vehicles:\n\n"
-			reply := leadNote + FormatMatches(allMatches) + "\n\n👉 Reply with vehicle number for details\n👉 Reply *TEST DRIVE* to schedule a test drive\n👉 Reply *FINANCE* for loan options"
-			return reply, true, nil
+			leadNote := "🚗 We don't have vehicles matching that exact search in stock right now, but here are our top featured vehicles:"
+			return FormatMatchesWithHeader(allMatches, leadNote), true, nil
 		}
 	}
 

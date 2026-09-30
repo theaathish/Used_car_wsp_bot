@@ -13,6 +13,9 @@ func EstimateVehicleValuation(brand, model string, year, km int, condition strin
 	// 1. Establish base value based on brand/model tier
 	basePrice := 600000 // default ~6 Lakhs
 	switch {
+	case strings.Contains(modelLower, "m4") || strings.Contains(modelLower, "m3") || strings.Contains(modelLower, "m5") ||
+		strings.Contains(modelLower, "amg") || strings.Contains(modelLower, "911") || strings.Contains(modelLower, "gt-r"):
+		basePrice = 7500000
 	case strings.Contains(brandLower, "bmw") || strings.Contains(brandLower, "mercedes") || strings.Contains(brandLower, "audi") ||
 		strings.Contains(brandLower, "jaguar") || strings.Contains(brandLower, "land rover") || strings.Contains(brandLower, "porsche"):
 		basePrice = 2800000

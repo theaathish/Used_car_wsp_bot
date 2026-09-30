@@ -84,7 +84,7 @@ func MatchVehicles(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 	query := fmt.Sprintf(`SELECT id::text, make, model, year, price, fuel, transmission, km, description
 		FROM vehicles
 		WHERE %s
-		ORDER BY price ASC
+		ORDER BY CASE WHEN price >= 100000 THEN 0 ELSE 1 END, year DESC, price ASC
 		LIMIT 5`, strings.Join(whereClauses, " AND "))
 
 	rows, err := tx.Query(ctx, query, args...)
@@ -131,14 +131,19 @@ func MatchVehicles(ctx context.Context, tx pgx.Tx, leadID string, data map[strin
 	return matches, nil
 }
 
-// FormatMatches formats the match list into a user-friendly WhatsApp response.
-func FormatMatches(matches []MatchResult) string {
+// FormatMatchesWithHeader formats the match list with an optional custom header and clean action footer.
+func FormatMatchesWithHeader(matches []MatchResult, customHeader string) string {
 	if len(matches) == 0 {
 		return "Sorry, we don't have any vehicles matching your criteria right now. Our team will follow up if new stock arrives."
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🚗 *Here are vehicles matching your preferences:*\n\n")
+	if customHeader != "" {
+		sb.WriteString(strings.TrimSpace(customHeader))
+		sb.WriteString("\n\n")
+	} else {
+		sb.WriteString("🚗 *Here are vehicles matching your preferences:*\n\n")
+	}
 
 	icons := []string{"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"}
 	for i, m := range matches {
@@ -163,8 +168,13 @@ func FormatMatches(matches []MatchResult) string {
 		}
 	}
 
-	sb.WriteString("\nReply with vehicle number for more details or to book a test drive!")
+	sb.WriteString("\n👉 Reply with vehicle number for details\n👉 Reply *TEST DRIVE* to schedule a test drive\n👉 Reply *FINANCE* for loan options")
 	return sb.String()
+}
+
+// FormatMatches formats the match list into a user-friendly WhatsApp response.
+func FormatMatches(matches []MatchResult) string {
+	return FormatMatchesWithHeader(matches, "")
 }
 
 func formatPrice(price int) string {

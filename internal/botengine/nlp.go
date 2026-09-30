@@ -330,6 +330,17 @@ func extractModel(body string, brandFound string) string {
 		lm := strings.ToLower(m)
 		pattern := `\b` + regexp.QuoteMeta(lm) + `\b`
 		if matched, _ := regexp.MatchString(pattern, lower); matched {
+			fields := strings.Fields(body)
+			for i, f := range fields {
+				cleanF := strings.Trim(strings.ToLower(f), ".,!?*")
+				if cleanF == lm && i+1 < len(fields) {
+					nextWord := strings.Trim(fields[i+1], ".,!?*")
+					switch strings.ToLower(nextWord) {
+					case "cs", "csl", "gts", "gt", "sport", "competition", "comp", "line", "xline", "m-sport":
+						return m + " " + strings.ToUpper(nextWord)
+					}
+				}
+			}
 			return m
 		}
 	}
@@ -345,6 +356,13 @@ func extractModel(body string, brandFound string) string {
 					lNext := strings.ToLower(nextWord)
 					// Avoid noise words
 					if !isFillerWord(lNext) {
+						if i+2 < len(fields) {
+							subNext := strings.Trim(fields[i+2], ".,!?*")
+							switch strings.ToLower(subNext) {
+							case "cs", "csl", "gts", "gt", "sport", "competition", "comp":
+								return nextWord + " " + strings.ToUpper(subNext)
+							}
+						}
 						return nextWord
 					}
 				}

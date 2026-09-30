@@ -769,5 +769,93 @@ func TestValidate_ConversationalTolerant(t *testing.T) {
 	}
 }
 
+func TestEngine_TwoStepSellFlow(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://localhost/sellingbot_test?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	engine := New(pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Clean tables
+	_, _ = tx.Exec(ctx, "DELETE FROM conversation_answers; DELETE FROM bot_conditions; DELETE FROM bot_questions; DELETE FROM bot_flows;")
+
+	// Insert test flow
+	var flowID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(name, slug, is_entry_flow, is_active) VALUES ('Buy Flow', 'buy_flow', true, true) RETURNING id`).Scan(&flowID)
+	_, _ = tx.Exec(ctx, `INSERT INTO bot_questions(flow_id, field_name, question_text, question_type, allowed_values, order_index, is_active)
+		VALUES ($1, 'vehicle_type', 'What type of car are you looking for? (SUV, Sedan, Hatchback, MPV, Any)', 'select', '["SUV", "Sedan", "Any"]'::jsonb, 1, true)`, flowID)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60199998888', 'Seller User') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// 1. Initial greeting
+	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
+	if err != nil {
+		t.Fatalf("hi err: %v", err)
+	}
+	if !strings.Contains(reply, "What type of car") {
+		t.Fatalf("unexpected greeting reply: %q", reply)
+	}
+
+	// 2. User says "sell"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "sell")
+	if err != nil {
+		t.Fatalf("sell err: %v", err)
+	}
+	if !strings.Contains(reply, "Sell Your Car Instantly") {
+		t.Fatalf("expected Sell Your Car Instantly prompt, got: %q", reply)
+	}
+
+	// 3. User responds with details: "bmw m4 cs 2020 50000km"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "bmw m4 cs 2020 50000km")
+	if err != nil {
+		t.Fatalf("m4 cs valuation err: %v", err)
+	}
+	if !strings.Contains(reply, "Vehicle Review Complete") || !strings.Contains(reply, "Estimated Valuation") {
+		t.Fatalf("expected automated valuation completion, got: %q", reply)
+	}
+	if !strings.Contains(reply, "BMW") || !strings.Contains(reply, "M4 CS") {
+		t.Fatalf("expected BMW M4 CS in reply, got: %q", reply)
+	}
+
+	// Verify sell_requests accepted
+	var srCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM sell_requests WHERE lead_id=$1 AND status='ACCEPTED'`, leadID).Scan(&srCount)
+	if srCount == 0 {
+		t.Fatal("expected accepted sell request in DB")
+	}
+
+	// Verify vehicle inserted into inventory
+	var vehCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM vehicles WHERE make='BMW' AND model='M4 CS' AND acquired_via='customer_sell'`).Scan(&vehCount)
+	if vehCount == 0 {
+		t.Fatal("expected BMW M4 CS to be added to vehicles inventory in DB")
+	}
+
+	// 4. User says "i want to buy a bmw" -> should switch back to buy and match stock
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "i want to buy a bmw")
+	if err != nil {
+		t.Fatalf("buy err: %v", err)
+	}
+	if !strings.Contains(reply, "BMW") {
+		t.Fatalf("expected BMW vehicle match results, got %q", reply)
+	}
+}
+
+
 
 
