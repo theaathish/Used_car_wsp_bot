@@ -429,13 +429,22 @@ func TestEngine_FullBuyFlow(t *testing.T) {
 		t.Fatalf("insert vehicle err: %v", err)
 	}
 
-	// 1. Initial inbound message starts the entry flow
+	// 1. Initial inbound message starts the entry flow (Welcome & Menu)
 	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
 	if err != nil {
 		t.Fatalf("step 1 err: %v", err)
 	}
+	if !strings.Contains(reply, "Welcome") || !strings.Contains(reply, "Buy") {
+		t.Fatalf("step 1 expected welcome/menu question, got: %q", reply)
+	}
+
+	// 1b. Choose Buy -> routes to Buy Flow and asks vehicle_type
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Buy")
+	if err != nil {
+		t.Fatalf("step 1b err: %v", err)
+	}
 	if !strings.Contains(reply, "SUV") {
-		t.Fatalf("step 1 expected vehicle_type question, got: %q", reply)
+		t.Fatalf("step 1b expected vehicle_type question, got: %q", reply)
 	}
 
 	// 2. Answer vehicle_type -> advances to budget_max
@@ -501,11 +510,11 @@ func TestEngine_FullBuyFlow(t *testing.T) {
 		t.Fatalf("step 8 expected vehicle match results, got: %q", reply)
 	}
 
-	// Assert conversation_answers has exactly 7 rows
+	// Assert conversation_answers has exactly 8 rows (service_intent + 7 buy fields)
 	var answerCount int
 	err = tx.QueryRow(ctx, `SELECT count(*) FROM conversation_answers WHERE conversation_id=$1`, convID).Scan(&answerCount)
-	if err != nil || answerCount != 7 {
-		t.Fatalf("expected 7 answers, got %d (err: %v)", answerCount, err)
+	if err != nil || answerCount != 8 {
+		t.Fatalf("expected 8 answers, got %d (err: %v)", answerCount, err)
 	}
 
 	// Assert leads.extracted_data contains all captured fields
@@ -558,7 +567,7 @@ func TestEngine_InvalidThenValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err on invalid: %v", err)
 	}
-	if !strings.Contains(reply, "Please choose one of") {
+	if !strings.Contains(reply, "Please reply *1*") && !strings.Contains(reply, "BUY") {
 		t.Fatalf("expected validation error message, got: %q", reply)
 	}
 
@@ -569,13 +578,13 @@ func TestEngine_InvalidThenValid(t *testing.T) {
 		t.Fatalf("expected 0 answers on invalid input, got %d", count)
 	}
 
-	// Send valid value
-	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Sedan")
+	// Send valid value "Buy"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Buy")
 	if err != nil {
 		t.Fatalf("unexpected err on valid: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(reply), "budget") {
-		t.Fatalf("expected advance to budget question, got: %q", reply)
+	if !strings.Contains(reply, "SUV") {
+		t.Fatalf("expected advance to Buy flow vehicle_type question, got: %q", reply)
 	}
 
 	// Assert exactly 1 answer recorded
@@ -586,8 +595,8 @@ func TestEngine_InvalidThenValid(t *testing.T) {
 
 	var fieldName, valCaptured string
 	_ = tx.QueryRow(ctx, `SELECT field_name, value_captured FROM conversation_answers WHERE conversation_id=$1`, convID).Scan(&fieldName, &valCaptured)
-	if fieldName != "vehicle_type" || valCaptured != "Sedan" {
-		t.Fatalf("expected vehicle_type=Sedan, got %s=%s", fieldName, valCaptured)
+	if fieldName != "service_intent" || valCaptured != "Buy" {
+		t.Fatalf("expected service_intent=Buy, got %s=%s", fieldName, valCaptured)
 	}
 }
 
@@ -621,8 +630,8 @@ func TestEngine_SessionExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reset err: %v", err)
 	}
-	if !strings.Contains(reply, "SUV") {
-		t.Fatalf("expected restarted flow to ask vehicle_type, got %q", reply)
+	if !strings.Contains(reply, "Welcome") {
+		t.Fatalf("expected restarted flow to ask welcome question, got %q", reply)
 	}
 
 	// Verify conversation state was updated to entry flow
@@ -855,6 +864,106 @@ func TestEngine_TwoStepSellFlow(t *testing.T) {
 		t.Fatalf("expected BMW vehicle match results, got %q", reply)
 	}
 }
+
+func TestEngine_WelcomeGreetingAndBuySellBranching(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://localhost/sellingbot_test?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	engine := New(pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Clean tables
+	_, _ = tx.Exec(ctx, "DELETE FROM conversation_answers; DELETE FROM bot_conditions; DELETE FROM bot_questions; DELETE FROM bot_flows;")
+
+	// Insert Welcome, Buy, and Sell flows
+	var welcomeFlowID, buyFlowID, sellFlowID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, is_active) VALUES ('11111111-1111-1111-1111-111111111100', 'Welcome & Menu', 'welcome_flow', true, true) RETURNING id`).Scan(&welcomeFlowID)
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, is_active) VALUES ('11111111-1111-1111-1111-111111111101', 'Buy a Car', 'buy_flow', false, true) RETURNING id`).Scan(&buyFlowID)
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, is_active) VALUES ('11111111-1111-1111-1111-111111111102', 'Sell a Car', 'sell_flow', false, true) RETURNING id`).Scan(&sellFlowID)
+
+	// Welcome Question
+	var welcomeQID, buyQ1ID, sellQ1ID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, allowed_values, order_index, is_active)
+		VALUES ('22222222-2222-2222-2222-222222222001', $1, 'service_intent', '🚗 *Welcome to AutoKart!*\n\nHow can we help you today?\n\n1️⃣ *Buy a Car*\n2️⃣ *Sell Your Car*\n\n👉 Reply *1* or *BUY* to browse cars\n👉 Reply *2* or *SELL* to sell your car', 'select', '["Buy","Sell","1","2"]'::jsonb, 1, true) RETURNING id`, welcomeFlowID).Scan(&welcomeQID)
+
+	// Buy Question 1
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, allowed_values, order_index, is_active)
+		VALUES ('22222222-2222-2222-2222-222222222101', $1, 'vehicle_type', 'What type of car are you looking for? (SUV, Sedan, Hatchback, MPV, Any)', 'select', '["SUV","Sedan","Any"]'::jsonb, 1, true) RETURNING id`, buyFlowID).Scan(&buyQ1ID)
+
+	// Sell Question 1
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, order_index, is_active)
+		VALUES ('22222222-2222-2222-2222-222222222201', $1, 'sell_brand', '🚗 *Sell Your Car Instantly!*\n\nWhat brand/make is your car?', 'text', 1, true) RETURNING id`, sellFlowID).Scan(&sellQ1ID)
+
+	// Conditions on Welcome Question:
+	// "Buy" or "1" -> Buy flow
+	// "Sell" or "2" -> Sell flow
+	_, _ = tx.Exec(ctx, `INSERT INTO bot_conditions(question_id, field_name, operator, value, target_flow_id, priority) VALUES
+		($1, 'service_intent', 'eq', 'Buy', $2, 1),
+		($1, 'service_intent', 'eq', '1', $2, 2),
+		($1, 'service_intent', 'eq', 'Sell', $3, 3),
+		($1, 'service_intent', 'eq', '2', $3, 4)`, welcomeQID, buyFlowID, sellFlowID)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60188887777', 'Flow Branching User') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// 1. Initial "hi" MUST return Welcome greeting + ask Buy or Sell!
+	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
+	if err != nil {
+		t.Fatalf("step 1 err: %v", err)
+	}
+	if !strings.Contains(reply, "Welcome") || !strings.Contains(reply, "Buy a Car") || !strings.Contains(reply, "Sell Your Car") {
+		t.Fatalf("expected initial greeting and buy/sell prompt, got: %q", reply)
+	}
+
+	// 2. Replying "1" (or "buy") MUST branch to the Buy flow!
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "1")
+	if err != nil {
+		t.Fatalf("step 2 err: %v", err)
+	}
+	if !strings.Contains(reply, "What type of car are you looking for") {
+		t.Fatalf("expected Buy flow vehicle_type question, got: %q", reply)
+	}
+
+	// 3. User says "menu" -> MUST reset to Welcome & Menu flow!
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "menu")
+	if err != nil {
+		t.Fatalf("step 3 menu err: %v", err)
+	}
+	if !strings.Contains(reply, "Welcome") || !strings.Contains(reply, "Buy a Car") {
+		t.Fatalf("expected menu to reset to welcome question, got: %q", reply)
+	}
+
+	// 4. Replying "2" (or "sell") MUST branch to the Sell flow!
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "2")
+	if err != nil {
+		t.Fatalf("step 4 err: %v", err)
+	}
+	if !strings.Contains(reply, "Sell Your Car") || !strings.Contains(reply, "What brand/make") {
+		t.Fatalf("expected Sell flow question, got: %q", reply)
+	}
+
+	// Verify lead was marked with intent=SELL and sell_mode=true
+	var leadIntent string
+	_ = tx.QueryRow(ctx, `SELECT intent FROM leads WHERE id=$1`, leadID).Scan(&leadIntent)
+	if leadIntent != "SELL" {
+		t.Fatalf("expected lead intent SELL, got %q", leadIntent)
+	}
+}
+
 
 
 

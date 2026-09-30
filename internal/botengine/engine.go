@@ -204,6 +204,14 @@ func (e *Engine) ProcessMessage(ctx context.Context, tx pgx.Tx, convID, custID, 
 				nextQuestionID = &firstQ.ID
 			}
 		}
+
+		// When entering sell flow, activate sell_mode on lead
+		var flowSlug string
+		_ = tx.QueryRow(ctx, `SELECT slug FROM bot_flows WHERE id=$1`, *nextFlowID).Scan(&flowSlug)
+		if flowSlug == "sell_flow" && leadID != "" {
+			_ = e.updateLeadExtractedData(ctx, tx, leadID, map[string]any{"sell_mode": "true"})
+			_, _ = tx.Exec(ctx, `UPDATE leads SET intent='SELL', updated_at=now() WHERE id=$1`, leadID)
+		}
 	}
 
 	// 7. Check if flow is complete
@@ -560,6 +568,17 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 	if q == nil {
 		return false
 	}
+
+	// Welcome / Intent question handles "buy", "sell", "1", "2"
+	if q.FieldName == "service_intent" || q.FieldName == "intent" {
+		lower := strings.ToLower(strings.TrimSpace(body))
+		if lower == "1" || lower == "2" || lower == "buy" || lower == "sell" ||
+			strings.EqualFold(lower, "buy a car") || strings.EqualFold(lower, "sell a car") ||
+			strings.EqualFold(lower, "sell my car") {
+			return true
+		}
+	}
+
 	// Explicit action intents are never regular survey answers
 	if nlp.Intent == IntentTestDrive || nlp.Intent == IntentFinance || nlp.Intent == IntentHuman || nlp.Intent == IntentSell {
 		return false
@@ -571,6 +590,8 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 	}
 
 	switch q.FieldName {
+	case "service_intent", "intent":
+		return true
 	case "vehicle_type":
 		if nlp.Brand != "" || nlp.Model != "" || nlp.BudgetMax > 0 {
 			return false
@@ -610,26 +631,25 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 
 func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID, custID, leadID, body string, currentQuestion *Question, nlp NLPEntities) (string, bool, error) {
 	_ = custID
-	// If conversation just started with no active question and user sent a bare greeting, let entry flow initialize
-	if currentQuestion == nil && isGreetingText(body) {
-		return "", false, nil
+	// Bare greeting or reset command
+	if isGreetingText(body) {
+		// If conversation just started with no active question, let entry flow initialize
+		if currentQuestion == nil {
+			return "", false, nil
+		}
+		// Mid-conversation greeting or reset -> restart at entry welcome flow
+		reply, err := e.ResetConversation(ctx, tx, convID)
+		if err == nil && reply != "" {
+			return reply, true, nil
+		}
 	}
 
 	// 1. Reset / Menu
-	if nlp.Intent == IntentReset || (nlp.Intent == IntentGreeting && currentQuestion == nil) {
-		_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
-		msg := "🚗 *Welcome to AutoKart!*\n" +
-			"I can help you find, finance, or sell a pre-owned car with 100% automated matching & valuation.\n\n" +
-			"You can simply type what you're looking for, e.g.:\n" +
-			"• *\"BMW M4\"* or *\"Mercedes C-Class\"*\n" +
-			"• *\"Petrol SUV under 15 Lakh\"*\n" +
-			"• *\"Automatic hatchback\"*\n\n" +
-			"Or choose an option:\n" +
-			"1️⃣ *View All Available Cars*\n" +
-			"2️⃣ *Sell Your Car* (Instant valuation & auto-listing)\n" +
-			"3️⃣ *Book a Test Drive* (Sales specialist desk)\n" +
-			"4️⃣ *Apply for Car Finance* (Finance specialist desk)"
-		return msg, true, nil
+	if nlp.Intent == IntentReset {
+		reply, err := e.ResetConversation(ctx, tx, convID)
+		if err == nil && reply != "" {
+			return reply, true, nil
+		}
 	}
 
 	// 2. Human Agent Request

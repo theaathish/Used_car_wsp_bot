@@ -672,25 +672,43 @@ func (s *Server) resetDefaultBotConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Upsert Buy a Car flow as entry flow
+	// 3. Upsert Welcome & Menu flow as entry flow
+	var welcomeFlowID string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM bot_flows WHERE slug='welcome_flow'`).Scan(&welcomeFlowID)
+	if err != nil {
+		welcomeFlowID = "11111111-1111-1111-1111-111111111100"
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO bot_flows(id, name, slug, is_entry_flow, trigger_matching, is_active)
+			VALUES ($1, 'Welcome & Menu', 'welcome_flow', true, false, true)
+			ON CONFLICT (slug) DO UPDATE
+			SET is_entry_flow = true, trigger_matching = false, is_active = true, updated_at = now()
+		`, welcomeFlowID); err != nil {
+			http.Error(w, `{"error":"welcome flow insert failed: `+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+	} else {
+		_, _ = tx.Exec(ctx, `UPDATE bot_flows SET is_entry_flow=true, trigger_matching=false, is_active=true, updated_at=now() WHERE id=$1`, welcomeFlowID)
+	}
+
+	// 4. Upsert Buy a Car flow
 	var buyFlowID string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM bot_flows WHERE slug='buy_flow'`).Scan(&buyFlowID)
 	if err != nil {
 		buyFlowID = "11111111-1111-1111-1111-111111111101"
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO bot_flows(id, name, slug, is_entry_flow, trigger_matching, is_active)
-			VALUES ($1, 'Buy a Car', 'buy_flow', true, true, true)
+			VALUES ($1, 'Buy a Car', 'buy_flow', false, true, true)
 			ON CONFLICT (slug) DO UPDATE
-			SET is_entry_flow = true, trigger_matching = true, is_active = true, updated_at = now()
+			SET is_entry_flow = false, trigger_matching = true, is_active = true, updated_at = now()
 		`, buyFlowID); err != nil {
 			http.Error(w, `{"error":"buy flow insert failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
 		}
 	} else {
-		_, _ = tx.Exec(ctx, `UPDATE bot_flows SET is_entry_flow=true, trigger_matching=true, is_active=true, updated_at=now() WHERE id=$1`, buyFlowID)
+		_, _ = tx.Exec(ctx, `UPDATE bot_flows SET is_entry_flow=false, trigger_matching=true, is_active=true, updated_at=now() WHERE id=$1`, buyFlowID)
 	}
 
-	// 4. Upsert Sell a Car flow
+	// 5. Upsert Sell a Car flow
 	var sellFlowID string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM bot_flows WHERE slug='sell_flow'`).Scan(&sellFlowID)
 	if err != nil {
@@ -699,16 +717,57 @@ func (s *Server) resetDefaultBotConfig(w http.ResponseWriter, r *http.Request) {
 			INSERT INTO bot_flows(id, name, slug, is_entry_flow, trigger_matching, is_active)
 			VALUES ($1, 'Sell a Car', 'sell_flow', false, false, true)
 			ON CONFLICT (slug) DO UPDATE
-			SET is_active = true, updated_at = now()
+			SET is_entry_flow = false, trigger_matching = false, is_active = true, updated_at = now()
 		`, sellFlowID); err != nil {
 			http.Error(w, `{"error":"sell flow insert failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
 		}
 	} else {
-		_, _ = tx.Exec(ctx, `UPDATE bot_flows SET is_active=true, updated_at=now() WHERE id=$1`, sellFlowID)
+		_, _ = tx.Exec(ctx, `UPDATE bot_flows SET is_entry_flow=false, trigger_matching=false, is_active=true, updated_at=now() WHERE id=$1`, sellFlowID)
 	}
 
-	// 5. Seed Buy a Car questions with sequential chaining
+	// 6. Seed Welcome & Menu question and conditions
+	welcomeQID := "22222222-2222-2222-2222-222222222001"
+	welcomeText := "🚗 *Welcome to AutoKart!*\n\nHow can we help you today?\n\n1️⃣ *Buy a Car* — Browse our verified pre-owned cars\n2️⃣ *Sell Your Car* — Instant evaluation & listing\n\n👉 Reply *1* or *BUY* to browse cars\n👉 Reply *2* or *SELL* to sell your car"
+	welcomeAllowed := `["Buy","Sell","1","2"]`
+	welcomeErr := "Please reply *1* (or BUY) to browse cars, or *2* (or SELL) to sell your car."
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, validation_rule, allowed_values, error_message, next_question_id, is_required, order_index, is_active)
+		VALUES ($1, $2, 'service_intent', $3, 'select', '', $4::jsonb, $5, NULL, true, 1, true)
+		ON CONFLICT (id) DO UPDATE
+		SET field_name = 'service_intent', question_text = EXCLUDED.question_text, question_type = 'select',
+		    allowed_values = EXCLUDED.allowed_values, error_message = EXCLUDED.error_message,
+		    is_required = true, order_index = 1, is_active = true, updated_at = now()
+	`, welcomeQID, welcomeFlowID, welcomeText, welcomeAllowed, welcomeErr); err != nil {
+		http.Error(w, `{"error":"welcome question insert failed: `+err.Error()+`"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Seed branching conditions on Welcome question to route to Buy or Sell flows
+	type condDef struct {
+		id, val, targetFlow string
+		priority            int
+	}
+	welcomeConditions := []condDef{
+		{"33333333-3333-3333-3333-333333333001", "Buy", buyFlowID, 1},
+		{"33333333-3333-3333-3333-333333333002", "1", buyFlowID, 2},
+		{"33333333-3333-3333-3333-333333333003", "Sell", sellFlowID, 3},
+		{"33333333-3333-3333-3333-333333333004", "2", sellFlowID, 4},
+	}
+	for _, c := range welcomeConditions {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO bot_conditions(id, question_id, field_name, operator, value, target_flow_id, priority)
+			VALUES ($1, $2, 'service_intent', 'eq', $3, $4, $5)
+			ON CONFLICT (id) DO UPDATE
+			SET operator = 'eq', value = EXCLUDED.value, target_flow_id = EXCLUDED.target_flow_id, priority = EXCLUDED.priority
+		`, c.id, welcomeQID, c.val, c.targetFlow, c.priority); err != nil {
+			http.Error(w, `{"error":"welcome condition failed: `+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// 7. Seed Buy a Car questions with sequential chaining
 	type qDef struct {
 		id, field, text, qtype, val, allowed, errMsg, nextID string
 		order                                                int

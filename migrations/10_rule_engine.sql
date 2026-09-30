@@ -83,11 +83,25 @@ INSERT INTO bot_responses(response_key, response_text) VALUES
   ('greeting', 'Hello! Welcome back.')
 ON CONFLICT (response_key) DO NOTHING;
 
--- Seed default Buy and Sell flows
+-- Seed default Welcome, Buy and Sell flows
 INSERT INTO bot_flows(id, name, slug, is_entry_flow, trigger_matching, is_active) VALUES
-  ('11111111-1111-1111-1111-111111111101', 'Buy a Car', 'buy_flow', true, true, true),
+  ('11111111-1111-1111-1111-111111111100', 'Welcome & Menu', 'welcome_flow', true, false, true),
+  ('11111111-1111-1111-1111-111111111101', 'Buy a Car', 'buy_flow', false, true, true),
   ('11111111-1111-1111-1111-111111111102', 'Sell a Car', 'sell_flow', false, false, true)
 ON CONFLICT (slug) DO NOTHING;
+
+-- Seed questions for Welcome flow
+INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, validation_rule, allowed_values, error_message, is_required, order_index) VALUES
+  ('22222222-2222-2222-2222-222222222001', '11111111-1111-1111-1111-111111111100', 'service_intent', '🚗 *Welcome to AutoKart!*\n\nHow can we help you today?\n\n1️⃣ *Buy a Car* — Browse our verified pre-owned cars\n2️⃣ *Sell Your Car* — Instant evaluation & listing\n\n👉 Reply *1* or *BUY* to browse cars\n👉 Reply *2* or *SELL* to sell your car', 'select', '', '["Buy","Sell","1","2"]'::jsonb, 'Please reply *1* (or BUY) to browse cars, or *2* (or SELL) to sell your car.', true, 1)
+ON CONFLICT (id) DO NOTHING;
+
+-- Seed conditions on Welcome flow -> branch to Buy or Sell flows
+INSERT INTO bot_conditions(id, question_id, field_name, operator, value, target_flow_id, priority) VALUES
+  ('33333333-3333-3333-3333-333333333001', '22222222-2222-2222-2222-222222222001', 'service_intent', 'eq', 'Buy', '11111111-1111-1111-1111-111111111101', 1),
+  ('33333333-3333-3333-3333-333333333002', '22222222-2222-2222-2222-222222222001', 'service_intent', 'eq', '1', '11111111-1111-1111-1111-111111111101', 2),
+  ('33333333-3333-3333-3333-333333333003', '22222222-2222-2222-2222-222222222001', 'service_intent', 'eq', 'Sell', '11111111-1111-1111-1111-111111111102', 3),
+  ('33333333-3333-3333-3333-333333333004', '22222222-2222-2222-2222-222222222001', 'service_intent', 'eq', '2', '11111111-1111-1111-1111-111111111102', 4)
+ON CONFLICT (id) DO NOTHING;
 
 -- Seed questions for Buy flow
 INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, validation_rule, allowed_values, error_message, is_required, order_index) VALUES

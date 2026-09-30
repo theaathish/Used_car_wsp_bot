@@ -830,7 +830,7 @@ async function makeCurrentFlowDefault() {
 }
 
 async function applyDefaultBotConfig() {
-  const ok = confirm("Restore default bot configuration?\n\nThis will apply standard 'Buy a Car' (entry flow) and 'Sell a Car' flows with 15 questions, branching conditions, and response templates.");
+  const ok = confirm("Restore default bot configuration?\n\nThis will apply standard 'Welcome & Menu' (entry flow), 'Buy a Car', and 'Sell a Car' flows with 16 questions, branching conditions, and response templates.");
   if (!ok) return;
 
   const btn = document.getElementById('btn-reset-defaults');
@@ -1144,6 +1144,17 @@ function openCanvasDrawer(qId) {
   });
   condTargetSel.innerHTML = condTargetOpts;
 
+  // Populate condition target flow options
+  const condFlowSel = document.getElementById('cd_c_target_f');
+  if (condFlowSel) {
+    let condFlowOpts = '<option value="">Or Jump to Flow…</option>';
+    BOT_FLOWS.forEach(function(item) {
+      condFlowOpts += '<option value="' + esc(item.id) + '">Flow: ' + esc(item.name) + '</option>';
+    });
+    condFlowSel.innerHTML = condFlowOpts;
+    condFlowSel.value = '';
+  }
+
   document.getElementById('cd_title').textContent = 'Edit Question (' + esc(q.field_name) + ')';
   loadCanvasConditions(q.id);
 
@@ -1256,6 +1267,9 @@ async function loadCanvasConditions(qId) {
     if (c.target_question_id) {
       const tq = BOT_QUESTIONS.find(function(x) { return x.id === c.target_question_id; });
       targetName = tq ? '#' + tq.order_index + ' ' + tq.field_name : sid(c.target_question_id);
+    } else if (c.target_flow_id) {
+      const tf = BOT_FLOWS.find(function(x) { return x.id === c.target_flow_id; });
+      targetName = tf ? 'Flow: ' + tf.name : 'Flow: ' + sid(c.target_flow_id);
     }
     h += '<div class="row" style="margin:4px 0;background:#f8fafc;padding:6px 8px;border-radius:6px;border:1px solid var(--line);justify-content:space-between;align-items:center;font-size:11px">';
     h += '<div><code>' + esc(c.operator) + '</code> <b>"' + esc(c.value) + '"</b> ➔ ' + targetName + '</div>';
@@ -1270,14 +1284,17 @@ async function addCanvasCondition() {
   const op = val('cd_c_op');
   const value = val('cd_c_val');
   const targetQ = val('cd_c_target_q') || null;
+  const targetF = val('cd_c_target_f') || null;
 
   if (!value) { toast('Value to match is required', 'err'); return; }
+  if (!targetQ && !targetF) { toast('Please choose a Target Question or Target Flow', 'err'); return; }
 
   const payload = {
     question_id: curCanvasQuestionId,
     operator: op,
     value: value,
-    target_question_id: targetQ
+    target_question_id: targetQ,
+    target_flow_id: targetF
   };
 
   markCanvasSaving();
