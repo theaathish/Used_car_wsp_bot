@@ -57,15 +57,28 @@ func TestRateLimitExemptsHealth(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	get := func(p string) int {
-		r, _ := http.Get(srv.URL + p)
+		r, err := http.Get(srv.URL + p)
+		if err != nil {
+			t.Fatalf("http.Get(%s) failed: %v", p, err)
+			return 0
+		}
 		defer r.Body.Close()
 		return r.StatusCode
 	}
-	if get("/api/health") != 200 || get("/api/health") != 200 || get("/api/metrics") != 200 {
-		t.Fatal("health/metrics must never limit")
+	if h1 := get("/api/health"); h1 != 200 {
+		t.Fatalf("first health hit must be 200, got %d", h1)
 	}
-	if get("/api/leads") != 200 || get("/api/leads") == 200 {
-		t.Fatal("second guarded hit must 429")
+	if h2 := get("/api/health"); h2 != 200 {
+		t.Fatalf("second health hit must not be limited, got %d", h2)
+	}
+	if m := get("/api/metrics"); m != 200 {
+		t.Fatalf("metrics hit must be 200, got %d", m)
+	}
+	if l1 := get("/api/leads"); l1 != 200 {
+		t.Fatalf("first guarded hit must be 200, got %d", l1)
+	}
+	if l2 := get("/api/leads"); l2 == 200 {
+		t.Fatalf("second guarded hit must 429, got %d", l2)
 	}
 }
 
