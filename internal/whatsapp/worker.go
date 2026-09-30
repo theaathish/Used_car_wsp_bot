@@ -1565,11 +1565,12 @@ func (w *Worker) HandleMedia(ctx context.Context, phone, name, waMsgID string, d
 		return "", nil
 	}
 	ack := "Photo received and saved."
-	if state == "DONE" {
+	switch state {
+	case "DONE":
 		// Request already closed (e.g. valuation recorded): don't reopen the
 		// flow with photo noise, just close the loop politely.
 		ack = "Thanks! Your request is already recorded — our team will call you. Reply BUY or SELL for anything new."
-	} else if state == "SELL_PHOTOS" {
+	case "SELL_PHOTOS":
 		data := map[string]string{}
 		_ = json.Unmarshal(stateRaw, &data)
 		n := atoi(data["sell_photos"]) + 1
@@ -1582,7 +1583,7 @@ func (w *Worker) HandleMedia(ctx context.Context, phone, name, waMsgID string, d
 		data["sell_photos"] = strconv.Itoa(n)
 		m, _ := json.Marshal(dataWithPrev(data, state))
 		_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1, updated_at=now() WHERE id=$2`, string(m), leadID)
-	} else {
+	default:
 		ack += " Our team can view it. How can I help — *BUY* or *SELL*?"
 	}
 	_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, ack)

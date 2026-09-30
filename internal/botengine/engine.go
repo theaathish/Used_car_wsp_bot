@@ -195,35 +195,27 @@ func (e *Engine) ProcessMessage(ctx context.Context, tx pgx.Tx, convID, custID, 
 		return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
 	}
 
-	// 8. Circular flow guard (Review Focus 5): prevent infinite loops
-	visited := map[string]int{q.ID: 1}
-	chainCount := 0
+	// 8. Circular flow guard (Review Focus 5): prevent infinite immediate loops
 	targetQID := *nextQuestionID
+	if targetQID == q.ID {
+		return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
+	}
 
-	for {
-		chainCount++
-		if chainCount > 10 || visited[targetQID] >= 3 {
-			// Loop detected -> break and complete flow safely
+	nextQ, err := e.loadQuestion(ctx, tx, targetQID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
 		}
-		visited[targetQID]++
-
-		nextQ, err := e.loadQuestion(ctx, tx, targetQID)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
-			}
-			return "", err
-		}
-
-		// Update conversation state to next question
-		_, err = tx.Exec(ctx, `UPDATE conversations SET current_question_id=$1, updated_at=now() WHERE id=$2`, nextQ.ID, convID)
-		if err != nil {
-			return "", fmt.Errorf("update current question: %w", err)
-		}
-
-		return nextQ.QuestionText, nil
+		return "", err
 	}
+
+	// Update conversation state to next question
+	_, err = tx.Exec(ctx, `UPDATE conversations SET current_question_id=$1, updated_at=now() WHERE id=$2`, nextQ.ID, convID)
+	if err != nil {
+		return "", fmt.Errorf("update current question: %w", err)
+	}
+
+	return nextQ.QuestionText, nil
 }
 
 // ResetConversation resets flow state to start fresh (e.g. on greeting, menu, timeout).
