@@ -609,6 +609,7 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 }
 
 func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID, custID, leadID, body string, currentQuestion *Question, nlp NLPEntities) (string, bool, error) {
+	_ = custID
 	// If conversation just started with no active question and user sent a bare greeting, let entry flow initialize
 	if currentQuestion == nil && isGreetingText(body) {
 		return "", false, nil
