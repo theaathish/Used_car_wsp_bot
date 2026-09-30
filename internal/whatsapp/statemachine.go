@@ -131,10 +131,10 @@ func hasDigit(s string) bool { return strings.ContainsAny(s, "0123456789") }
 // sentences, so "hello i want bmw" flows through normally while a lone
 // "hi" is treated as a fresh-menu init from any state.
 func isGreetingOnly(body string) bool {
-	b := strings.Trim(strings.ToLower(strings.TrimSpace(body)), "!.?,;:~*_- ")
+	b := strings.Trim(strings.ToLower(strings.TrimSpace(body)), "!.?,;:~*_- \"'“”‘’")
 	switch b {
 	case "hi", "hello", "hey", "yo", "hai", "vanakkam", "namaste", "namaskar",
-		"good morning", "good evening", "good afternoon", "h":
+		"good morning", "good evening", "good afternoon", "h", "start":
 		return true
 	default:
 		return false

@@ -220,7 +220,7 @@ func isAnyPhrase(s string) bool {
 }
 
 func isGreetingText(s string) bool {
-	clean := strings.Trim(s, "!.?,;:-_ ")
+	clean := strings.Trim(strings.ToLower(strings.TrimSpace(s)), "!.?,;:-_~*\"'“”‘’ ")
 	switch clean {
 	case "hi", "hello", "hey", "hai", "vanakkam", "namaste", "namaskar",
 		"good morning", "good afternoon", "good evening", "yo", "start":
@@ -230,9 +230,9 @@ func isGreetingText(s string) bool {
 }
 
 func isResetText(s string) bool {
-	clean := strings.Trim(s, "!.?,;:-_ ")
+	clean := strings.Trim(strings.ToLower(strings.TrimSpace(s)), "!.?,;:-_~*\"'“”‘’ ")
 	switch clean {
-	case "restart", "menu", "main menu", "start again", "home":
+	case "restart", "menu", "main menu", "start again", "home", "reset":
 		return true
 	}
 	return false

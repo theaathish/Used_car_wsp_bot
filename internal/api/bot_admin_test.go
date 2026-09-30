@@ -201,8 +201,9 @@ func TestSimulateEndpoint(t *testing.T) {
 	if reply == "" {
 		t.Fatalf("expected non-empty reply, got %v", res)
 	}
-	if !strings.Contains(reply, "SUV") && !strings.Contains(reply, "Welcome") {
-		t.Fatalf("expected welcome or entry question, got %q", reply)
+	t.Logf("SIMULATE REPLY:\n%s", reply)
+	if !strings.Contains(reply, "Welcome") || !strings.Contains(reply, "Buy a Car") {
+		t.Fatalf("expected welcome and buy/sell prompt, got %q", reply)
 	}
 }
 
