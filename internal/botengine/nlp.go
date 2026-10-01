@@ -264,6 +264,9 @@ func isFinanceRequest(s string) bool {
 		strings.Contains(s, "loan") ||
 		strings.Contains(s, "emi") ||
 		strings.Contains(s, "down payment") ||
+		strings.Contains(s, "payment") ||
+		strings.Contains(s, "payments") ||
+		strings.Contains(s, "pay") ||
 		strings.Contains(s, "installment") ||
 		strings.Contains(s, "interest rate")
 }
@@ -490,10 +493,10 @@ func extractYearRange(body string) (int, int) {
 }
 
 func extractKM(lower string) int {
-	rxKM := regexp.MustCompile(`(\d+)\s*(?:k|thousand)?\s*km\b`)
-	if m := rxKM.FindStringSubmatch(lower); len(m) == 2 {
+	rxKM := regexp.MustCompile(`(\d+)\s*(k|thousand)?\s*km\b`)
+	if m := rxKM.FindStringSubmatch(lower); len(m) == 3 {
 		v, _ := strconv.Atoi(m[1])
-		if strings.Contains(m[0], "k") {
+		if m[2] == "k" || m[2] == "thousand" {
 			return v * 1000
 		}
 		return v
@@ -510,3 +513,77 @@ func isFillerWord(w string) bool {
 	}
 	return fillers[w]
 }
+
+// CleanMakeAndModel normalizes brand and model, preventing duplications like "BMW M4 CS M4 CS".
+func CleanMakeAndModel(rawBrand, rawModel string) (string, string) {
+	b := strings.TrimSpace(rawBrand)
+	m := strings.TrimSpace(rawModel)
+
+	// If rawBrand contains a known brand (e.g. "BMW" from "bmw m4 cs"), normalize make
+	if known := extractBrand(b); known != "" {
+		if m == "" {
+			m = extractModel(b, known)
+		}
+		b = known
+	} else if knownM := extractBrand(m); knownM != "" && b == "" {
+		b = knownM
+		m = extractModel(m, knownM)
+	}
+
+	// If rawModel already starts with brand, strip brand prefix from model
+	if b != "" && m != "" {
+		lb := strings.ToLower(b)
+		lm := strings.ToLower(m)
+		if strings.HasPrefix(lm, lb) {
+			m = strings.TrimSpace(m[len(b):])
+		}
+	}
+
+	// If rawBrand ends with rawModel (e.g. brand "bmw m4 cs", model "m4 cs"), strip model from brand
+	if m != "" && b != "" {
+		lb := strings.ToLower(b)
+		lm := strings.ToLower(m)
+		if strings.HasSuffix(lb, lm) {
+			b = strings.TrimSpace(b[:len(b)-len(m)])
+		}
+	}
+
+	if b == "" {
+		b = rawBrand
+	}
+	if m == "" {
+		m = rawModel
+	}
+
+	// Normalize casing
+	if len(b) > 0 {
+		b = strings.ToUpper(b[:1]) + b[1:]
+	}
+	if len(m) > 0 {
+		m = strings.ToUpper(m[:1]) + m[1:]
+	}
+
+	lb := strings.ToLower(b)
+	switch lb {
+	case "bmw":
+		b = "BMW"
+	case "mercedes", "mercedes-benz", "benz":
+		b = "Mercedes-Benz"
+	case "vw", "volkswagen":
+		b = "Volkswagen"
+	case "byd":
+		b = "BYD"
+	case "mg":
+		b = "MG"
+	}
+
+	lm := strings.ToLower(m)
+	if strings.HasPrefix(lm, "m4") {
+		m = strings.ToUpper(m)
+	} else if strings.Contains(lm, "cs") || strings.Contains(lm, "gt") {
+		m = strings.ToUpper(m)
+	}
+
+	return b, m
+}
+

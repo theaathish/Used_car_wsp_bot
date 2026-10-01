@@ -439,14 +439,16 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 	}
 
 	if isSellFlow && extracted != nil && leadID != "" {
-		brand, _ := getString(extracted, "sell_brand")
-		if brand == "" {
-			brand, _ = getString(extracted, "brand")
+		rawBrand, _ := getString(extracted, "sell_brand")
+		if rawBrand == "" {
+			rawBrand, _ = getString(extracted, "brand")
 		}
-		model, _ := getString(extracted, "sell_model")
-		if model == "" {
-			model, _ = getString(extracted, "model")
+		rawModel, _ := getString(extracted, "sell_model")
+		if rawModel == "" {
+			rawModel, _ = getString(extracted, "model")
 		}
+		brand, model := CleanMakeAndModel(rawBrand, rawModel)
+
 		yearNum, _ := getNumber(extracted, "sell_year")
 		if yearNum == 0 {
 			yearNum, _ = getNumber(extracted, "year")
@@ -475,38 +477,40 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 		if reg == "" {
 			reg, _ = getString(extracted, "registration")
 		}
-		expPrice, _ := getNumber(extracted, "expected_price")
 
-		if brand != "" && model != "" {
+		if brand != "" || model != "" {
 			sID := uuid.NewString()
-			vID := uuid.NewString()
-			valPrice := EstimateVehicleValuation(brand, model, int(yearNum), int(kmNum), cond, int(expPrice))
 
-			// 1. Insert sell_requests as ACCEPTED
+			// 1. Insert sell_requests as VALUATION_PENDING (Valuation is manual by dealership team)
 			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, registration, km, fuel, transmission, condition, location, status)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ACCEPTED')`,
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'VALUATION_PENDING')`,
 				sID, leadID, brand, model, int(yearNum), reg, int(kmNum), fuel, trans, cond, loc)
 
-			// 2. Insert into vehicles inventory as AVAILABLE
-			desc := strings.TrimSpace(cond + " " + loc + " " + reg)
-			if desc == "" {
-				desc = "Verified pre-owned vehicle (auto-reviewed)"
+			// 2. Update lead status
+			_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
+
+			// 3. Format details for confirmation message
+			var detailLines []string
+			if kmNum > 0 {
+				detailLines = append(detailLines, fmt.Sprintf("• 🛣️ *Mileage*: %s km", FormatPrice(int(kmNum))))
 			}
-			_, _ = tx.Exec(ctx, `INSERT INTO vehicles (id, make, model, year, price, fuel, transmission, km, status, description, acquired_via)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'AVAILABLE', $9, 'customer_sell')`,
-				vID, brand, model, int(yearNum), valPrice, fuel, trans, int(kmNum), desc)
+			if fuel != "" || trans != "" {
+				detailLines = append(detailLines, fmt.Sprintf("• ⛽ *Fuel*: %s | ⚙️ *Transmission*: %s", fuel, trans))
+			}
+			if cond != "" {
+				detailLines = append(detailLines, fmt.Sprintf("• 📋 *Condition*: %s", cond))
+			}
+			if loc != "" {
+				detailLines = append(detailLines, fmt.Sprintf("• 📍 *Location*: %s", loc))
+			}
 
-			// 3. Link customer photos from this conversation
-			_, _ = tx.Exec(ctx, `INSERT INTO vehicle_images(vehicle_id, path, sort_order)
-				SELECT $1, m.media_path, row_number() over ()
-				FROM messages m WHERE m.conversation_id = $2 AND m.media_path <> ''`,
-				vID, convID)
+			detailsBlock := ""
+			if len(detailLines) > 0 {
+				detailsBlock = "\n" + strings.Join(detailLines, "\n")
+			}
 
-			// 4. Update lead status
-			_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', updated_at=now() WHERE id=$1`, leadID)
-
-			// 5. Tailored completion message with automated valuation
-			reply = fmt.Sprintf("🎉 *Vehicle Review Complete!*\n\nYour %d %s %s has been automatically evaluated and accepted into our inventory!\n\n📋 *Estimated Valuation*: ₹%s\n📍 *Status*: Verified & Listed as Available\n\nOur sales specialist will contact you shortly to coordinate vehicle inspection and paperwork.", int(yearNum), brand, model, FormatPrice(valPrice))
+			reply = fmt.Sprintf("📋 *Vehicle Submission Received!*\n\nThank you! We have received your car details for *%d %s %s*:%s\n\n📋 *Status*: Under Manual Review & Valuation\nOur valuation team will review your vehicle details, verify the condition, and contact you shortly with an official valuation offer!",
+				int(yearNum), brand, model, detailsBlock)
 			return reply, nil
 		}
 	}
@@ -734,21 +738,7 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		return "💼 *Finance Application Received!*\n\nOur dedicated finance desk has been notified. A human finance specialist will contact you shortly to review your loan eligibility, zero-down-payment options, and customize low-interest EMI plans for you!", true, nil
 	}
 
-	// 5. Automated Selling Flow
-	data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
-	isSellMode := false
-	if sm, ok := getString(data, "sell_mode"); ok && (sm == "true" || sm == "1") {
-		isSellMode = true
-	}
-	if leadID != "" && !isSellMode {
-		var currentIntent string
-		_ = tx.QueryRow(ctx, `SELECT intent FROM leads WHERE id=$1`, leadID).Scan(&currentIntent)
-		if currentIntent == "SELL" {
-			isSellMode = true
-		}
-	}
-
-	// Check if user explicitly switches from sell mode to buy, or expresses search/purchase intent
+	// 5. Explicit Buy Switch / Search Intent
 	lowerBody := strings.ToLower(strings.TrimSpace(body))
 	explicitBuy := strings.Contains(lowerBody, "buy") ||
 		strings.Contains(lowerBody, "purchase") ||
@@ -763,25 +753,45 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		strings.Contains(lowerBody, "find me")
 
 	if explicitBuy {
-		isSellMode = false
-		nlp.Intent = IntentBuy
-		nlp.HasSearchSignals = true
 		if leadID != "" {
 			_, _ = tx.Exec(ctx, `UPDATE leads SET intent='BUY', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
 		}
 		_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
+		nlp.Intent = IntentBuy
+		nlp.HasSearchSignals = true
 	}
 
-	if (nlp.Intent == IntentSell || nlp.HasSellSignals || isSellMode) && !explicitBuy {
-		brand := nlp.Brand
-		model := nlp.Model
-		if brand == "" {
-			brand, _ = getString(data, "sell_brand")
+	// 6. Sell Intent Handling
+	data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+	isSellMode := false
+	if sm, ok := getString(data, "sell_mode"); ok && (sm == "true" || sm == "1") {
+		isSellMode = true
+	}
+
+	isSellMsg := (nlp.Intent == IntentSell || nlp.HasSellSignals || isSellRequest(lowerBody) || isSellMode) && !explicitBuy
+	if isSellMsg {
+		// If user is already in sell_flow, check if they are just answering a survey question
+		// (e.g. typing model, year, km, fuel, etc.) rather than sending an explicit sell command
+		var flowSlug string
+		if currentQuestion != nil {
+			_ = tx.QueryRow(ctx, `SELECT slug FROM bot_flows WHERE id=$1`, currentQuestion.FlowID).Scan(&flowSlug)
 		}
-		if model == "" {
-			model, _ = getString(data, "sell_model")
+		inSellFlow := flowSlug == "sell_flow"
+
+		// If user is inside sell_flow and the message is NOT an explicit sell command:
+		// LET THE FLOW QUESTIONS CONTINUE! Do NOT cut off the questionnaire!
+		if inSellFlow && !isSellRequest(lowerBody) {
+			return "", false, nil
 		}
 
+		rawBrand := nlp.Brand
+		if rawBrand == "" {
+			rawBrand, _ = getString(data, "sell_brand")
+		}
+		rawModel := nlp.Model
+		if rawModel == "" {
+			rawModel, _ = getString(data, "sell_model")
+		}
 		year := nlp.YearMin
 		if year == 0 {
 			yNum, _ := getNumber(data, "sell_year")
@@ -792,12 +802,12 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			kNum, _ := getNumber(data, "sell_km")
 			km = int(kNum)
 		}
+		brand, model := CleanMakeAndModel(rawBrand, rawModel)
 
-		// Only auto-evaluate and accept if user provided complete vehicle specifications:
-		// Brand, Model, and Year MUST be provided (> 0). Year is NEVER defaulted!
+		// If user provided complete vehicle specifications in one single message outside a flow:
 		if brand != "" && model != "" && year > 0 {
 			if km == 0 {
-				km = 35000 // reasonable default if mileage omitted but year was specified
+				km = 35000
 			}
 			fuel := nlp.Fuel
 			if fuel == "" {
@@ -815,34 +825,35 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			}
 
 			sID := uuid.NewString()
-			vID := uuid.NewString()
-			valPrice := EstimateVehicleValuation(brand, model, year, km, "Good", 0)
-
-			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, km, fuel, transmission, condition, status)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Good', 'ACCEPTED')`,
+			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, km, fuel, transmission, condition, location, status)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Good', '', 'VALUATION_PENDING')`,
 				sID, leadID, brand, model, year, km, fuel, trans)
-
-			desc := fmt.Sprintf("Verified pre-owned %s %s (auto-reviewed & listed)", brand, model)
-			_, _ = tx.Exec(ctx, `INSERT INTO vehicles (id, make, model, year, price, fuel, transmission, km, status, description, acquired_via)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'AVAILABLE', $9, 'customer_sell')`,
-				vID, brand, model, year, valPrice, fuel, trans, km, desc)
 
 			if leadID != "" {
 				_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
 			}
 			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
 
-			reply := fmt.Sprintf("🎉 *Vehicle Review Complete!*\n\nYour %d %s %s has been automatically evaluated and accepted into our inventory!\n\n📋 *Estimated Valuation*: ₹%s\n📍 *Status*: Verified & Listed as Available\n\nOur team will contact you shortly to coordinate vehicle pickup and paperwork.",
-				year, brand, model, FormatPrice(valPrice))
+			reply := fmt.Sprintf("📋 *Vehicle Submission Received!*\n\nThank you! We have received your car details for *%d %s %s*:\n• 🛣️ *Mileage*: %s km\n• ⛽ *Fuel*: %s | ⚙️ *Transmission*: %s\n\n📋 *Status*: Under Manual Review & Valuation\nOur valuation team will review your vehicle details and contact you shortly with an official valuation offer!",
+				year, brand, model, FormatPrice(km), fuel, trans)
 			return reply, true, nil
 		}
 
-		// If user is currently answering a structured flow without explicit sell intent, let the questionnaire handle it!
-		if currentQuestion != nil && !nlp.HasSellSignals && nlp.Intent != IntentSell {
-			return "", false, nil
+		// Otherwise, start the structured Sell flow so proper data is collected!
+		var sellFlowID string
+		_ = tx.QueryRow(ctx, `SELECT id FROM bot_flows WHERE slug='sell_flow' AND is_active=true`).Scan(&sellFlowID)
+		if sellFlowID != "" {
+			firstQ, err := e.findFirstQuestion(ctx, tx, sellFlowID)
+			if err == nil {
+				_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=$1, current_question_id=$2, updated_at=now() WHERE id=$3`, sellFlowID, firstQ.ID, convID)
+				if leadID != "" {
+					_, _ = tx.Exec(ctx, `UPDATE leads SET intent='SELL', updated_at=now() WHERE id=$1`, leadID)
+				}
+				return firstQ.QuestionText, true, nil
+			}
 		}
 
-		// Save sell_mode and whatever partial fields are provided
+		// Fallback prompt if sell_flow is not configured
 		updates := map[string]any{"sell_mode": "true"}
 		if brand != "" {
 			updates["sell_brand"] = brand
@@ -862,7 +873,7 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		}
 		_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
 
-		return "🚗 *Sell Your Car Instantly!*\n\nPlease tell us your car's Brand, Model, Manufacturing Year, and approximate Mileage (e.g. *\"2019 Honda City, 45,000 km\"*).\n\nWe will evaluate your car automatically and list it in our inventory!", true, nil
+		return "🚗 *Sell Your Car Instantly!*\n\nPlease tell us your car's Brand, Model, Manufacturing Year, and approximate Mileage (e.g. *\"2019 Honda City, 45,000 km\"*).\n\nWe will review your vehicle and contact you with an official valuation offer!", true, nil
 	}
 
 	// 6. Direct Vehicle Selection (#1, #2, etc.)

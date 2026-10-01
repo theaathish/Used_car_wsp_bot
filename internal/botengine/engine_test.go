@@ -736,19 +736,15 @@ func TestEngine_ConversationalNLP_Flow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sell err: %v", err)
 	}
-	if !strings.Contains(reply, "Vehicle Review Complete") || !strings.Contains(reply, "Estimated Valuation") {
-		t.Fatalf("expected sell valuation confirmation, got %q", reply)
+	if !strings.Contains(reply, "Vehicle Submission Received") || !strings.Contains(reply, "Manual Review") {
+		t.Fatalf("expected vehicle submission confirmation, got %q", reply)
 	}
 
-	// Verify sell_requests and vehicles record created automatically
-	var sellCount, vehCount int
-	_ = tx.QueryRow(ctx, `SELECT count(*) FROM sell_requests WHERE lead_id=$1 AND status='ACCEPTED'`, leadID).Scan(&sellCount)
+	// Verify sell_requests record created with status VALUATION_PENDING for manual review
+	var sellCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM sell_requests WHERE lead_id=$1 AND status='VALUATION_PENDING'`, leadID).Scan(&sellCount)
 	if sellCount == 0 {
-		t.Fatal("expected accepted sell_request record in DB")
-	}
-	_ = tx.QueryRow(ctx, `SELECT count(*) FROM vehicles WHERE make='Honda' AND model='City' AND acquired_via='customer_sell'`, ).Scan(&vehCount)
-	if vehCount == 0 {
-		t.Fatal("expected newly listed Honda City vehicle in DB")
+		t.Fatal("expected pending sell_request record in DB")
 	}
 }
 
@@ -834,28 +830,24 @@ func TestEngine_TwoStepSellFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("m4 cs valuation err: %v", err)
 	}
-	if !strings.Contains(reply, "Vehicle Review Complete") || !strings.Contains(reply, "Estimated Valuation") {
-		t.Fatalf("expected automated valuation completion, got: %q", reply)
+	if !strings.Contains(reply, "Vehicle Submission Received") || !strings.Contains(reply, "Manual Review") {
+		t.Fatalf("expected manual valuation submission confirmation, got: %q", reply)
 	}
 	if !strings.Contains(reply, "BMW") || !strings.Contains(reply, "M4 CS") {
 		t.Fatalf("expected BMW M4 CS in reply, got: %q", reply)
 	}
 
-	// Verify sell_requests accepted
+	// Verify sell_requests status is VALUATION_PENDING for manual review by dealership
 	var srCount int
-	_ = tx.QueryRow(ctx, `SELECT count(*) FROM sell_requests WHERE lead_id=$1 AND status='ACCEPTED'`, leadID).Scan(&srCount)
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM sell_requests WHERE lead_id=$1 AND status='VALUATION_PENDING'`, leadID).Scan(&srCount)
 	if srCount == 0 {
-		t.Fatal("expected accepted sell request in DB")
-	}
-
-	// Verify vehicle inserted into inventory
-	var vehCount int
-	_ = tx.QueryRow(ctx, `SELECT count(*) FROM vehicles WHERE make='BMW' AND model='M4 CS' AND acquired_via='customer_sell'`).Scan(&vehCount)
-	if vehCount == 0 {
-		t.Fatal("expected BMW M4 CS to be added to vehicles inventory in DB")
+		t.Fatal("expected pending sell request in DB")
 	}
 
 	// 4. User says "i want to buy a bmw" -> should switch back to buy and match stock
+	_, _ = tx.Exec(ctx, `INSERT INTO vehicles(id, make, model, year, price, fuel, transmission, description, status)
+		VALUES (gen_random_uuid(), 'BMW', '320i', 2021, 150000, 'Petrol', 'Automatic', 'Luxury Sedan', 'AVAILABLE')`)
+
 	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "i want to buy a bmw")
 	if err != nil {
 		t.Fatalf("buy err: %v", err)
@@ -1057,6 +1049,165 @@ func TestEngine_SellFlow_DoesNotDefaultYearOrKm(t *testing.T) {
 	// Must advance to question 3 (year)
 	if !strings.Contains(strings.ToLower(reply), "year") {
 		t.Fatalf("expected year question, got: %q", reply)
+	}
+}
+
+func TestEngine_SellFlow_CompleteAllEightQuestions(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://localhost/sellingbot_test?sslmode=disable"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	engine := New(pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60199990099', 'FullSellTester') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// 1. Initial greeting -> Welcome & Menu
+	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
+	if err != nil {
+		t.Fatalf("hi err: %v", err)
+	}
+	if !strings.Contains(reply, "Welcome") || !strings.Contains(reply, "Sell") {
+		t.Fatalf("expected welcome & menu, got: %q", reply)
+	}
+
+	// 2. Select 2 (Sell) -> starts sell_flow Q1 (sell_brand)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "2")
+	if err != nil {
+		t.Fatalf("select sell err: %v", err)
+	}
+	if !strings.Contains(reply, "brand") && !strings.Contains(reply, "make") {
+		t.Fatalf("expected brand question, got: %q", reply)
+	}
+
+	// 3. Q1 (sell_brand): "bmw m4 cs" -> advances to Q2 (sell_model)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "bmw m4 cs")
+	if err != nil {
+		t.Fatalf("answer brand err: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "model") {
+		t.Fatalf("expected model question, got: %q", reply)
+	}
+
+	// 4. Q2 (sell_model): "m4 cs" -> advances to Q3 (sell_year)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "m4 cs")
+	if err != nil {
+		t.Fatalf("answer model err: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "year") {
+		t.Fatalf("expected year question, got: %q", reply)
+	}
+
+	// 5. Q3 (sell_year): "2022" -> MUST NOT CUT OFF! Must advance to Q4 (sell_km)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "2022")
+	if err != nil {
+		t.Fatalf("answer year err: %v", err)
+	}
+	if strings.Contains(reply, "Review Complete") || strings.Contains(reply, "Estimated Valuation") {
+		t.Fatalf("CRITICAL BUG: flow was cut off prematurely at year 2022! Got: %q", reply)
+	}
+	if !strings.Contains(strings.ToLower(reply), "mileage") && !strings.Contains(strings.ToLower(reply), "kilometer") {
+		t.Fatalf("expected mileage question, got: %q", reply)
+	}
+
+	// 6. Q4 (sell_km): "35000" -> advances to Q5 (sell_fuel)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "35000")
+	if err != nil {
+		t.Fatalf("answer km err: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "fuel") {
+		t.Fatalf("expected fuel question, got: %q", reply)
+	}
+
+	// 7. Q5 (sell_fuel): "Petrol" -> advances to Q6 (sell_transmission)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Petrol")
+	if err != nil {
+		t.Fatalf("answer fuel err: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "transmission") {
+		t.Fatalf("expected transmission question, got: %q", reply)
+	}
+
+	// 8. Q6 (sell_transmission): "Automatic" -> advances to Q7 (sell_condition)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Automatic")
+	if err != nil {
+		t.Fatalf("answer transmission err: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "condition") {
+		t.Fatalf("expected condition question, got: %q", reply)
+	}
+
+	// 9. Q7 (sell_condition): "Good" -> advances to Q8 (sell_location)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Good")
+	if err != nil {
+		t.Fatalf("answer condition err: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "location") && !strings.Contains(strings.ToLower(reply), "located") {
+		t.Fatalf("expected location question, got: %q", reply)
+	}
+
+	// 10. Q8 (sell_location): "Kuala Lumpur" -> COMPLETES FLOW with manual valuation status!
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Kuala Lumpur")
+	if err != nil {
+		t.Fatalf("answer location err: %v", err)
+	}
+	if !strings.Contains(reply, "Vehicle Submission Received") || !strings.Contains(reply, "Manual Review") {
+		t.Fatalf("expected manual valuation confirmation, got: %q", reply)
+	}
+	// Must NOT contain duplicate "bmw m4 cs m4 cs"
+	if strings.Contains(strings.ToLower(reply), "m4 cs m4 cs") {
+		t.Fatalf("duplicate model name found in reply: %q", reply)
+	}
+	if !strings.Contains(reply, "2022 BMW M4 CS") {
+		t.Fatalf("expected cleaned '2022 BMW M4 CS' in reply, got: %q", reply)
+	}
+
+	// Verify sell_requests status is VALUATION_PENDING (NOT ACCEPTED)
+	var srStatus, srBrand, srModel string
+	var srYear, srKM int
+	err = tx.QueryRow(ctx, `SELECT status, brand, model, year, km FROM sell_requests WHERE lead_id=$1`, leadID).Scan(
+		&srStatus, &srBrand, &srModel, &srYear, &srKM)
+	if err != nil {
+		t.Fatalf("failed to query sell_requests: %v", err)
+	}
+	if srStatus != "VALUATION_PENDING" {
+		t.Fatalf("expected status VALUATION_PENDING, got %q", srStatus)
+	}
+	if srBrand != "BMW" || srModel != "M4 CS" || srYear != 2022 || srKM != 35000 {
+		t.Fatalf("expected BMW M4 CS 2022 35000km, got %s %s %d %d", srBrand, srModel, srYear, srKM)
+	}
+
+	// Verify vehicles table has ZERO customer_sell entries (NOT auto-listed as AVAILABLE)
+	var vehCount int
+	_ = tx.QueryRow(ctx, `SELECT count(*) FROM vehicles WHERE make='BMW' AND model='M4 CS'`).Scan(&vehCount)
+	if vehCount != 0 {
+		t.Fatalf("CRITICAL: Vehicle was auto-listed into inventory without manual valuation! Count: %d", vehCount)
+	}
+
+	// 11. Next message: user says "payment" -> MUST route to Finance, NOT trigger "Sell Your Car Instantly!"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "payment")
+	if err != nil {
+		t.Fatalf("payment err: %v", err)
+	}
+	if strings.Contains(reply, "Sell Your Car Instantly") {
+		t.Fatalf("CRITICAL BUG: 'payment' triggered 'Sell Your Car Instantly!' prompt! Got: %q", reply)
+	}
+	if !strings.Contains(reply, "Finance Application Received") {
+		t.Fatalf("expected Finance Application Received, got: %q", reply)
 	}
 }
 
