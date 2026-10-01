@@ -1160,10 +1160,19 @@ func TestEngine_SellFlow_CompleteAllEightQuestions(t *testing.T) {
 		t.Fatalf("expected location question, got: %q", reply)
 	}
 
-	// 10. Q8 (sell_location): "Kuala Lumpur" -> COMPLETES FLOW with manual valuation status!
+	// 10. Q8 (sell_location): "Kuala Lumpur" -> Advances to Q9 (sell_photos)
 	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Kuala Lumpur")
 	if err != nil {
 		t.Fatalf("answer location err: %v", err)
+	}
+	if !strings.Contains(reply, "upload 2 photos") {
+		t.Fatalf("expected photos question, got: %q", reply)
+	}
+
+	// 11. Q9 (sell_photos): "skip" -> COMPLETES FLOW with manual valuation status!
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "skip")
+	if err != nil {
+		t.Fatalf("answer photos err: %v", err)
 	}
 	if !strings.Contains(reply, "Vehicle Submission Received") || !strings.Contains(reply, "Manual Review") {
 		t.Fatalf("expected manual valuation confirmation, got: %q", reply)
@@ -1210,6 +1219,294 @@ func TestEngine_SellFlow_CompleteAllEightQuestions(t *testing.T) {
 		t.Fatalf("expected Finance Application Received, got: %q", reply)
 	}
 }
+
+func TestEngine_BuyFlow_GenericBuyStartsQuestionnaireNotMatchDump(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://user:password@localhost:5432/sellingbot_test"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping test; no postgres available")
+	}
+	defer pool.Close()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	engine := New(pool)
+
+	// Clean tables
+	_, _ = tx.Exec(ctx, `TRUNCATE vehicles, customers, conversations, conversation_answers, leads, bot_questions, bot_conditions, bot_flows, sell_requests CASCADE`)
+
+	// Insert vehicles in inventory
+	_, _ = tx.Exec(ctx, `INSERT INTO vehicles (id, make, model, year, price, fuel, transmission, km, status, description)
+		VALUES (gen_random_uuid(), 'Mazda', 'CX-5', 2026, 135000, 'Petrol', 'Automatic', 10000, 'AVAILABLE', 'High Facelift'),
+		       (gen_random_uuid(), 'BMW', '218 Sport', 2026, 168000, 'Petrol', 'Automatic', 14000, 'AVAILABLE', 'Sport Sedan'),
+		       (gen_random_uuid(), 'BMW', 'X1', 2026, 228000, 'Petrol', 'Automatic', 9000, 'AVAILABLE', 'xLine SUV')`)
+
+	// 1. Setup Welcome flow
+	var welcomeFlowID, buyFlowID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, is_active)
+		VALUES ('11111111-1111-1111-1111-111111111100', 'Welcome & Menu', 'welcome_flow', true, true) RETURNING id`).Scan(&welcomeFlowID)
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, trigger_matching, is_active)
+		VALUES ('11111111-1111-1111-1111-111111111101', 'Buy a Car', 'buy_flow', false, true, true) RETURNING id`).Scan(&buyFlowID)
+
+	var welcomeQID, buyQ1ID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, allowed_values, is_required, order_index, is_active)
+		VALUES ('22222222-2222-2222-2222-222222222001', $1, 'service_intent', '🚗 Welcome to AutoKart!\n\n1️⃣ Buy a Car\n2️⃣ Sell Your Car', 'select', '["Buy","Sell","1","2"]'::jsonb, true, 1, true) RETURNING id`, welcomeFlowID).Scan(&welcomeQID)
+
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, allowed_values, is_required, order_index, is_active)
+		VALUES ('22222222-2222-2222-2222-222222222101', $1, 'vehicle_type', 'What type of car are you looking for? (SUV, Sedan, Hatchback, MPV, Any)', 'select', '["SUV","Sedan","Hatchback","MPV","Any"]'::jsonb, true, 1, true) RETURNING id`, buyFlowID).Scan(&buyQ1ID)
+
+	_, _ = tx.Exec(ctx, `INSERT INTO bot_conditions(question_id, field_name, operator, value, target_flow_id, priority)
+		VALUES ($1, 'service_intent', 'eq', 'Buy', $2, 1),
+		       ($1, 'service_intent', 'eq', '1', $2, 2)`, welcomeQID, buyFlowID)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60177778888', 'Buy Tester') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// Scenario A: Customer starts fresh with "hi buy"
+	// MUST NOT dump random vehicles ("Here are vehicles matching your preferences: Mazda CX-5...")
+	// MUST start buy_flow and ask Question 1 ("What type of car are you looking for?")
+	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi buy")
+	if err != nil {
+		t.Fatalf("hi buy err: %v", err)
+	}
+	if strings.Contains(reply, "matching your preferences") || strings.Contains(reply, "Mazda CX-5") {
+		t.Fatalf("CRITICAL BUG: 'hi buy' dumped random inventory vehicles instead of asking preferences! Got: %q", reply)
+	}
+	if !strings.Contains(reply, "What type of car") {
+		t.Fatalf("expected buy_flow Question 1, got: %q", reply)
+	}
+
+	// Scenario B: Reset and customer replies "1" or "BUY" to welcome prompt
+	_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=$1, current_question_id=$2 WHERE id=$3`, welcomeFlowID, welcomeQID, convID)
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "BUY")
+	if err != nil {
+		t.Fatalf("BUY err: %v", err)
+	}
+	if strings.Contains(reply, "matching your preferences") || strings.Contains(reply, "Mazda CX-5") {
+		t.Fatalf("CRITICAL BUG: 'BUY' on welcome menu dumped random vehicles! Got: %q", reply)
+	}
+	if !strings.Contains(reply, "What type of car") {
+		t.Fatalf("expected buy_flow Question 1, got: %q", reply)
+	}
+
+	// Scenario C: Customer answers Question 1 with "SUV"
+	// Should advance to next step, not dump inventory
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "SUV")
+	if err != nil {
+		t.Fatalf("SUV err: %v", err)
+	}
+	// Verify answer was recorded
+	var valCap string
+	_ = tx.QueryRow(ctx, `SELECT value_captured FROM conversation_answers WHERE conversation_id=$1 AND field_name='vehicle_type'`, convID).Scan(&valCap)
+	if valCap != "SUV" {
+		t.Fatalf("expected value_captured SUV, got: %q", valCap)
+	}
+}
+
+func TestEngine_SellFlow_CollectsTwoPhotos(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://user:password@localhost:5432/sellingbot_test"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping test; no postgres available")
+	}
+	defer pool.Close()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	engine := New(pool)
+
+	// Clean tables
+	_, _ = tx.Exec(ctx, `TRUNCATE vehicles, customers, conversations, conversation_answers, leads, bot_questions, bot_conditions, bot_flows, sell_requests CASCADE`)
+
+	// 1. Setup Welcome flow & Sell flow
+	var welcomeFlowID, sellFlowID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, is_active)
+		VALUES ('11111111-1111-1111-1111-111111111100', 'Welcome & Menu', 'welcome_flow', true, true) RETURNING id`).Scan(&welcomeFlowID)
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, trigger_matching, is_active)
+		VALUES ('11111111-1111-1111-1111-111111111102', 'Sell a Car', 'sell_flow', false, false, true) RETURNING id`).Scan(&sellFlowID)
+
+	var welcomeQID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, allowed_values, is_required, order_index, is_active)
+		VALUES ('22222222-2222-2222-2222-222222222001', $1, 'service_intent', '🚗 Welcome to AutoKart!\n\n1️⃣ Buy a Car\n2️⃣ Sell Your Car', 'select', '["Buy","Sell","1","2"]'::jsonb, true, 1, true) RETURNING id`, welcomeFlowID).Scan(&welcomeQID)
+
+	_, _ = tx.Exec(ctx, `INSERT INTO bot_conditions(question_id, field_name, operator, value, target_flow_id, priority)
+		VALUES ($1, 'service_intent', 'eq', 'Sell', $2, 1),
+		       ($1, 'service_intent', 'eq', '2', $2, 2)`, welcomeQID, sellFlowID)
+
+	// Questions 1 to 9 for sell_flow
+	_, _ = tx.Exec(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, allowed_values, is_required, order_index, next_question_id, is_active) VALUES
+		('22222222-2222-2222-2222-222222222201', $1, 'sell_brand', 'What brand/make is your car?', 'text', '[]'::jsonb, true, 1, '22222222-2222-2222-2222-222222222202', true),
+		('22222222-2222-2222-2222-222222222202', $1, 'sell_model', 'What is the car model?', 'text', '[]'::jsonb, true, 2, '22222222-2222-2222-2222-222222222203', true),
+		('22222222-2222-2222-2222-222222222203', $1, 'sell_year', 'Which year was it manufactured?', 'number', '[]'::jsonb, true, 3, '22222222-2222-2222-2222-222222222204', true),
+		('22222222-2222-2222-2222-222222222204', $1, 'sell_km', 'What is the current mileage?', 'number', '[]'::jsonb, true, 4, '22222222-2222-2222-2222-222222222205', true),
+		('22222222-2222-2222-2222-222222222205', $1, 'sell_fuel', 'What fuel type does it use?', 'select', '["Petrol","Diesel","Hybrid","Electric"]'::jsonb, true, 5, '22222222-2222-2222-2222-222222222206', true),
+		('22222222-2222-2222-2222-222222222206', $1, 'sell_transmission', 'What transmission is it?', 'select', '["Automatic","Manual"]'::jsonb, true, 6, '22222222-2222-2222-2222-222222222207', true),
+		('22222222-2222-2222-2222-222222222207', $1, 'sell_condition', 'What is the overall condition?', 'select', '["Excellent","Good","Fair","Poor"]'::jsonb, true, 7, '22222222-2222-2222-2222-222222222208', true),
+		('22222222-2222-2222-2222-222222222208', $1, 'sell_location', 'Where is the car located?', 'text', '[]'::jsonb, true, 8, '22222222-2222-2222-2222-222222222209', true),
+		('22222222-2222-2222-2222-222222222209', $1, 'sell_photos', '📸 Please upload 2 photos of your car for valuation.\n\nYou can upload the photos now, or reply *SKIP* to proceed without photos.', 'photo', '[]'::jsonb, false, 9, NULL, true)`,
+		sellFlowID)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60155554444', 'Photo Seller') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// 1. Initial greeting
+	reply, err := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
+	if err != nil {
+		t.Fatalf("hi err: %v", err)
+	}
+	if !strings.Contains(reply, "Welcome to AutoKart") {
+		t.Fatalf("expected welcome text, got: %q", reply)
+	}
+
+	// 2. Select Sell
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "2")
+	if err != nil {
+		t.Fatalf("select sell err: %v", err)
+	}
+	if !strings.Contains(reply, "brand") {
+		t.Fatalf("expected brand question, got: %q", reply)
+	}
+
+	// 3-9: Answer questions 1 to 8
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "bmw m4 cs")
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "m4 cs")
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "2022")
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "35000")
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Petrol")
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Automatic")
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Good")
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Kuala Lumpur")
+	if err != nil {
+		t.Fatalf("location err: %v", err)
+	}
+
+	// MUST advance to Question 9 (sell_photos)!
+	if !strings.Contains(reply, "upload 2 photos") {
+		t.Fatalf("expected 2 photos question after location, got: %q", reply)
+	}
+
+	// 10. Customer uploads Photo 1
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "[photo]")
+	if err != nil {
+		t.Fatalf("photo 1 err: %v", err)
+	}
+	if !strings.Contains(reply, "First photo received") || !strings.Contains(reply, "1 more photo") {
+		t.Fatalf("expected First photo received prompt, got: %q", reply)
+	}
+
+	// 11. Customer uploads Photo 2 -> COMPLETES FLOW!
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "[photo]")
+	if err != nil {
+		t.Fatalf("photo 2 err: %v", err)
+	}
+	if !strings.Contains(reply, "Vehicle Submission Received") || !strings.Contains(reply, "Manual Review") {
+		t.Fatalf("expected manual valuation confirmation, got: %q", reply)
+	}
+	if !strings.Contains(reply, "2 photos attached") {
+		t.Fatalf("expected '2 photos attached' in reply, got: %q", reply)
+	}
+	if !strings.Contains(reply, "2022 BMW M4 CS") {
+		t.Fatalf("expected normalized '2022 BMW M4 CS', got: %q", reply)
+	}
+
+	// Verify sell_requests status is VALUATION_PENDING and photo_count is 2
+	var srStatus string
+	var photoCount int
+	err = tx.QueryRow(ctx, `SELECT status, photo_count FROM sell_requests WHERE lead_id=$1`, leadID).Scan(&srStatus, &photoCount)
+	if err != nil {
+		t.Fatalf("query sell_requests err: %v", err)
+	}
+	if srStatus != "VALUATION_PENDING" {
+		t.Fatalf("expected status VALUATION_PENDING, got: %q", srStatus)
+	}
+	if photoCount != 2 {
+		t.Fatalf("expected photo_count 2, got: %d", photoCount)
+	}
+}
+
+func TestEngine_SellFlow_PhotosSkip(t *testing.T) {
+	ctx := context.Background()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://user:password@localhost:5432/sellingbot_test"
+	}
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Skip("skipping test; no postgres available")
+	}
+	defer pool.Close()
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	engine := New(pool)
+
+	// Clean tables
+	_, _ = tx.Exec(ctx, `TRUNCATE vehicles, customers, conversations, conversation_answers, leads, bot_questions, bot_conditions, bot_flows, sell_requests CASCADE`)
+
+	var sellFlowID string
+	_ = tx.QueryRow(ctx, `INSERT INTO bot_flows(id, name, slug, is_entry_flow, is_active)
+		VALUES ('11111111-1111-1111-1111-111111111102', 'Sell a Car', 'sell_flow', true, true) RETURNING id`).Scan(&sellFlowID)
+
+	_, _ = tx.Exec(ctx, `INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, allowed_values, is_required, order_index, next_question_id, is_active) VALUES
+		('22222222-2222-2222-2222-222222222201', $1, 'sell_brand', 'What brand?', 'text', '[]'::jsonb, true, 1, '22222222-2222-2222-2222-222222222202', true),
+		('22222222-2222-2222-2222-222222222202', $1, 'sell_photos', '📸 Please upload 2 photos or SKIP.', 'photo', '[]'::jsonb, false, 2, NULL, true)`, sellFlowID)
+
+	var custID, convID, leadID string
+	_ = tx.QueryRow(ctx, `INSERT INTO customers(phone, name) VALUES ('60155553333', 'Skip Seller') RETURNING id`).Scan(&custID)
+	_ = tx.QueryRow(ctx, `INSERT INTO leads(customer_id, status) VALUES ($1, 'NEW') RETURNING id`, custID).Scan(&leadID)
+	_ = tx.QueryRow(ctx, `INSERT INTO conversations(customer_id, lead_id, channel, status) VALUES ($1, $2, 'whatsapp', 'open') RETURNING id`, custID, leadID).Scan(&convID)
+
+	// Start flow
+	_, _ = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "hi")
+	// Answer brand
+	reply, _ := engine.ProcessMessage(ctx, tx, convID, custID, leadID, "Toyota")
+	if !strings.Contains(reply, "upload 2 photos") {
+		t.Fatalf("expected photos question, got: %q", reply)
+	}
+
+	// Reply "skip"
+	reply, err = engine.ProcessMessage(ctx, tx, convID, custID, leadID, "skip")
+	if err != nil {
+		t.Fatalf("skip err: %v", err)
+	}
+	if !strings.Contains(reply, "Vehicle Submission Received") {
+		t.Fatalf("expected submission received, got: %q", reply)
+	}
+	if !strings.Contains(reply, "Pending upload") {
+		t.Fatalf("expected Pending upload for photos, got: %q", reply)
+	}
+
+	var photoCount int
+	_ = tx.QueryRow(ctx, `SELECT photo_count FROM sell_requests WHERE lead_id=$1`, leadID).Scan(&photoCount)
+	if photoCount != 0 {
+		t.Fatalf("expected photo_count 0 on skip, got: %d", photoCount)
+	}
+}
+
 
 
 

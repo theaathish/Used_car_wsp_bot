@@ -148,6 +148,9 @@ func Validate(value string, questionType string, validationRule string, allowedV
 		}
 		return "", false
 
+	case "photo", "image":
+		return trimmed, true
+
 	default:
 		return trimmed, true
 	}

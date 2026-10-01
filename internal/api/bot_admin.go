@@ -857,21 +857,22 @@ func (s *Server) resetDefaultBotConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, q := range buyQuestions {
-		var next *string
-		if q.nextID != "" {
-			next = &q.nextID
-		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, validation_rule, allowed_values, error_message, next_question_id, is_required, order_index, is_active)
-			VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, true)
+			VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NULL, $9, $10, true)
 			ON CONFLICT (id) DO UPDATE
 			SET field_name = EXCLUDED.field_name, question_text = EXCLUDED.question_text, question_type = EXCLUDED.question_type,
 			    validation_rule = EXCLUDED.validation_rule, allowed_values = EXCLUDED.allowed_values,
-			    error_message = EXCLUDED.error_message, next_question_id = EXCLUDED.next_question_id,
+			    error_message = EXCLUDED.error_message,
 			    is_required = EXCLUDED.is_required, order_index = EXCLUDED.order_index, is_active = true, updated_at = now()
-		`, q.id, buyFlowID, q.field, q.text, q.qtype, q.val, q.allowed, q.errMsg, next, q.req, q.order); err != nil {
+		`, q.id, buyFlowID, q.field, q.text, q.qtype, q.val, q.allowed, q.errMsg, q.req, q.order); err != nil {
 			http.Error(w, `{"error":"buy question insert failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
+		}
+	}
+	for _, q := range buyQuestions {
+		if q.nextID != "" {
+			_, _ = tx.Exec(ctx, `UPDATE bot_questions SET next_question_id = $1 WHERE id = $2`, q.nextID, q.id)
 		}
 	}
 
@@ -897,25 +898,27 @@ func (s *Server) resetDefaultBotConfig(w http.ResponseWriter, r *http.Request) {
 		{id: "22222222-2222-2222-2222-222222222205", field: "sell_fuel", text: "What fuel type does it use? (Petrol, Diesel, Hybrid, Electric)", qtype: "select", allowed: `["Petrol","Diesel","Hybrid","Electric"]`, errMsg: "Please select: Petrol, Diesel, Hybrid, or Electric.", order: 5, req: true, nextID: "22222222-2222-2222-2222-222222222206"},
 		{id: "22222222-2222-2222-2222-222222222206", field: "sell_transmission", text: "What transmission is it? (Automatic, Manual)", qtype: "select", allowed: `["Automatic","Manual"]`, errMsg: "Please select Automatic or Manual.", order: 6, req: true, nextID: "22222222-2222-2222-2222-222222222207"},
 		{id: "22222222-2222-2222-2222-222222222207", field: "sell_condition", text: "What is the overall condition? (Excellent, Good, Fair, Poor)", qtype: "select", allowed: `["Excellent","Good","Fair","Poor"]`, errMsg: "Please select: Excellent, Good, Fair, or Poor.", order: 7, req: true, nextID: "22222222-2222-2222-2222-222222222208"},
-		{id: "22222222-2222-2222-2222-222222222208", field: "sell_location", text: "Where is the car located? (e.g. Kuala Lumpur, Petaling Jaya)", qtype: "text", allowed: "[]", errMsg: "Please enter the location of the car.", order: 8, req: true, nextID: ""},
+		{id: "22222222-2222-2222-2222-222222222208", field: "sell_location", text: "Where is the car located? (e.g. Kuala Lumpur, Petaling Jaya)", qtype: "text", allowed: "[]", errMsg: "Please enter the location of the car.", order: 8, req: true, nextID: "22222222-2222-2222-2222-222222222209"},
+		{id: "22222222-2222-2222-2222-222222222209", field: "sell_photos", text: "📸 Please upload 2 photos of your car (e.g. exterior front & rear, or interior dashboard) for valuation.\n\nYou can upload the photos now, or reply *SKIP* to proceed without photos.", qtype: "photo", allowed: "[]", errMsg: "Please upload a photo of your car or reply *SKIP*.", order: 9, req: false, nextID: ""},
 	}
 
 	for _, q := range sellQuestions {
-		var next *string
-		if q.nextID != "" {
-			next = &q.nextID
-		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO bot_questions(id, flow_id, field_name, question_text, question_type, validation_rule, allowed_values, error_message, next_question_id, is_required, order_index, is_active)
-			VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, true)
+			VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NULL, $9, $10, true)
 			ON CONFLICT (id) DO UPDATE
 			SET field_name = EXCLUDED.field_name, question_text = EXCLUDED.question_text, question_type = EXCLUDED.question_type,
 			    validation_rule = EXCLUDED.validation_rule, allowed_values = EXCLUDED.allowed_values,
-			    error_message = EXCLUDED.error_message, next_question_id = EXCLUDED.next_question_id,
+			    error_message = EXCLUDED.error_message,
 			    is_required = EXCLUDED.is_required, order_index = EXCLUDED.order_index, is_active = true, updated_at = now()
-		`, q.id, sellFlowID, q.field, q.text, q.qtype, q.val, q.allowed, q.errMsg, next, q.req, q.order); err != nil {
+		`, q.id, sellFlowID, q.field, q.text, q.qtype, q.val, q.allowed, q.errMsg, q.req, q.order); err != nil {
 			http.Error(w, `{"error":"sell question insert failed: `+err.Error()+`"}`, http.StatusInternalServerError)
 			return
+		}
+	}
+	for _, q := range sellQuestions {
+		if q.nextID != "" {
+			_, _ = tx.Exec(ctx, `UPDATE bot_questions SET next_question_id = $1 WHERE id = $2`, q.nextID, q.id)
 		}
 	}
 

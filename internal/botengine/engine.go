@@ -167,6 +167,51 @@ func (e *Engine) ProcessMessage(ctx context.Context, tx pgx.Tx, convID, custID, 
 		return errMsg, nil
 	}
 
+	// Special handling for vehicle photo collection (sell_photos)
+	if q.FieldName == "sell_photos" || q.FieldName == "photos" {
+		lowerVal := strings.ToLower(strings.TrimSpace(body))
+		isSkip := isAnyPhrase(lowerVal) || lowerVal == "skip" || lowerVal == "no" || lowerVal == "none" || lowerVal == "later" || lowerVal == "without"
+		isDone := lowerVal == "done" || lowerVal == "finish" || lowerVal == "ok" || lowerVal == "okay" || lowerVal == "2 photos" || lowerVal == "two photos" || lowerVal == "uploaded"
+
+		data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+		currentPhotos := 0
+		if pNum, ok := getNumber(data, "photo_count"); ok {
+			currentPhotos = int(pNum)
+		}
+
+		if isSkip {
+			_ = e.updateLeadExtractedData(ctx, tx, leadID, map[string]any{"photo_count": currentPhotos, "sell_photos": "skipped"})
+			return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
+		}
+
+		if isDone {
+			if currentPhotos == 0 {
+				currentPhotos = 2
+			}
+			_ = e.updateLeadExtractedData(ctx, tx, leadID, map[string]any{"photo_count": currentPhotos, "sell_photos": strconv.Itoa(currentPhotos)})
+			return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
+		}
+
+		isPhotoMsg := strings.Contains(lowerVal, "[photo]") || strings.Contains(lowerVal, "photo") ||
+			strings.Contains(lowerVal, "image") || strings.Contains(lowerVal, "pic") ||
+			strings.HasPrefix(lowerVal, "http") || strings.HasPrefix(lowerVal, "media/")
+
+		if isPhotoMsg {
+			currentPhotos++
+			_ = e.updateLeadExtractedData(ctx, tx, leadID, map[string]any{"photo_count": currentPhotos, "sell_photos": strconv.Itoa(currentPhotos)})
+			if currentPhotos < 2 {
+				// Stay on photo question and prompt for second photo
+				return "📸 *First photo received!* Please upload 1 more photo of your vehicle (e.g. rear or interior), or reply *DONE* / *SKIP* to finish.", nil
+			}
+			// 2 photos received: flow is complete!
+			return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
+		}
+
+		// Text fallback: record and complete flow
+		_ = e.updateLeadExtractedData(ctx, tx, leadID, map[string]any{"photo_count": currentPhotos, "sell_photos": normVal})
+		return e.completeFlow(ctx, tx, convID, leadID, currentFlowID)
+	}
+
 	// 5. Valid answer: record in conversation_answers
 	_, err = tx.Exec(ctx, `INSERT INTO conversation_answers(conversation_id, question_id, field_name, value_captured)
 		VALUES ($1, $2, $3, $4)`, convID, q.ID, q.FieldName, normVal)
@@ -478,13 +523,25 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 			reg, _ = getString(extracted, "registration")
 		}
 
+		photoCount := 0
+		if pNum, ok := getNumber(extracted, "photo_count"); ok {
+			photoCount = int(pNum)
+		}
+		var mediaCount int
+		_ = tx.QueryRow(ctx, `SELECT count(*) FROM messages m
+			JOIN conversations c ON c.id=m.conversation_id
+			WHERE c.lead_id=$1 AND m.media_path<>''`, leadID).Scan(&mediaCount)
+		if mediaCount > photoCount {
+			photoCount = mediaCount
+		}
+
 		if brand != "" || model != "" {
 			sID := uuid.NewString()
 
 			// 1. Insert sell_requests as VALUATION_PENDING (Valuation is manual by dealership team)
-			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, registration, km, fuel, transmission, condition, location, status)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'VALUATION_PENDING')`,
-				sID, leadID, brand, model, int(yearNum), reg, int(kmNum), fuel, trans, cond, loc)
+			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, registration, km, fuel, transmission, condition, location, photo_count, status)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'VALUATION_PENDING')`,
+				sID, leadID, brand, model, int(yearNum), reg, int(kmNum), fuel, trans, cond, loc, photoCount)
 
 			// 2. Update lead status
 			_, _ = tx.Exec(ctx, `UPDATE leads SET status='QUALIFIED', intent='SELL', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
@@ -502,6 +559,15 @@ func (e *Engine) completeFlow(ctx context.Context, tx pgx.Tx, convID, leadID str
 			}
 			if loc != "" {
 				detailLines = append(detailLines, fmt.Sprintf("• 📍 *Location*: %s", loc))
+			}
+			if photoCount > 0 {
+				if photoCount == 1 {
+					detailLines = append(detailLines, "• 📸 *Photos*: 1 photo attached")
+				} else {
+					detailLines = append(detailLines, fmt.Sprintf("• 📸 *Photos*: %d photos attached", photoCount))
+				}
+			} else {
+				detailLines = append(detailLines, "• 📸 *Photos*: Pending upload")
 			}
 
 			detailsBlock := ""
@@ -584,7 +650,7 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 	}
 
 	// Explicit action intents are never regular survey answers
-	if nlp.Intent == IntentTestDrive || nlp.Intent == IntentFinance || nlp.Intent == IntentHuman || nlp.Intent == IntentSell {
+	if nlp.Intent == IntentTestDrive || nlp.Intent == IntentFinance || nlp.Intent == IntentHuman {
 		return false
 	}
 	// Direct search phrases or buy switches are not simple survey answers
@@ -592,13 +658,15 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 	if strings.Contains(lower, "i want") || strings.Contains(lower, "looking for") ||
 		strings.Contains(lower, "show me") || strings.Contains(lower, "want a") ||
 		strings.Contains(lower, "need a") || strings.Contains(lower, "find me") ||
-		strings.Contains(lower, "buy") || strings.Contains(lower, "purchase") ||
-		strings.Contains(lower, "browse") {
+		(strings.Contains(lower, "buy") && !strings.HasPrefix(q.FieldName, "sell_")) ||
+		strings.Contains(lower, "purchase") || strings.Contains(lower, "browse") {
 		return false
 	}
 
 	switch q.FieldName {
 	case "service_intent", "intent":
+		return true
+	case "sell_photos", "photos":
 		return true
 	case "vehicle_type":
 		if nlp.Brand != "" || nlp.Model != "" || nlp.BudgetMax > 0 {
@@ -639,6 +707,8 @@ func isAnsweringCurrentQuestion(q *Question, nlp NLPEntities, body string) bool 
 
 func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID, custID, leadID, body string, currentQuestion *Question, nlp NLPEntities) (string, bool, error) {
 	_ = custID
+	lowerBody := strings.ToLower(strings.TrimSpace(body))
+
 	// Bare greeting or reset command
 	if isGreetingText(body) {
 		// If conversation just started with no active question, let entry flow initialize
@@ -738,8 +808,7 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		return "💼 *Finance Application Received!*\n\nOur dedicated finance desk has been notified. A human finance specialist will contact you shortly to review your loan eligibility, zero-down-payment options, and customize low-interest EMI plans for you!", true, nil
 	}
 
-	// 5. Explicit Buy Switch / Search Intent
-	lowerBody := strings.ToLower(strings.TrimSpace(body))
+	// 5. Explicit Buy / Search Intent detection
 	explicitBuy := strings.Contains(lowerBody, "buy") ||
 		strings.Contains(lowerBody, "purchase") ||
 		strings.Contains(lowerBody, "browse") ||
@@ -750,9 +819,71 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		strings.Contains(lowerBody, "need a") ||
 		strings.Contains(lowerBody, "looking for") ||
 		strings.Contains(lowerBody, "show me") ||
-		strings.Contains(lowerBody, "find me")
+		strings.Contains(lowerBody, "find me") ||
+		lowerBody == "1"
 
-	if explicitBuy {
+	// 6. Active flow protection: if user is currently answering a survey question
+	var flowSlug string
+	if currentQuestion != nil {
+		_ = tx.QueryRow(ctx, `SELECT slug FROM bot_flows WHERE id=$1`, currentQuestion.FlowID).Scan(&flowSlug)
+	}
+	inWelcomeFlow := flowSlug == "welcome_flow" || (currentQuestion != nil && (currentQuestion.FieldName == "service_intent" || currentQuestion.FieldName == "intent"))
+	inSellFlow := flowSlug == "sell_flow"
+
+	if currentQuestion != nil {
+		// If in welcome flow, check if user is replying to the menu (1, 2, buy, sell, etc.)
+		if inWelcomeFlow && isAnsweringCurrentQuestion(currentQuestion, nlp, body) {
+			return "", false, nil
+		}
+		// If inside sell_flow:
+		if inSellFlow {
+			// If user explicitly asks to BUY (e.g. "i want bmw m4" or "buy"), let them switch!
+			if !explicitBuy && !isSellRequest(lowerBody) && nlp.Intent != IntentReset && !isGreetingText(body) {
+				return "", false, nil
+			}
+		} else {
+			// If inside buy_flow or other questionnaire:
+			// If user explicitly asks to SELL, let them switch!
+			// If user explicitly searches for a specific car with brand/model (e.g. "i want bmw m4"): let them search!
+			// Otherwise: let the questionnaire question continue!
+			isDirectCarSearch := explicitBuy && (nlp.Brand != "" || nlp.Model != "")
+			if !isSellRequest(lowerBody) && lowerBody != "2" && !isDirectCarSearch && nlp.Intent != IntentReset && !isGreetingText(body) {
+				return "", false, nil
+			}
+		}
+	}
+
+	// 7. Sell Mode detection
+	data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
+	isSellMode := false
+	if sm, ok := getString(data, "sell_mode"); ok && (sm == "true" || sm == "1") {
+		isSellMode = true
+	}
+
+	// 8. Explicit Buy Switch / Buying Intent
+	isBuyIntent := (explicitBuy || (nlp.Intent == IntentBuy && !isSellMode)) && !isSellRequest(lowerBody) && lowerBody != "2"
+	if isBuyIntent {
+		hasSpecificCriteria := nlp.Brand != "" || nlp.Model != "" || nlp.BodyType != "" || nlp.BudgetMax > 0
+
+		if !hasSpecificCriteria {
+			// Generic buy request (e.g. "buy", "hi buy", "1", "browse", "i want to buy")
+			// START BUY FLOW so customer preferences are collected properly!
+			var buyFlowID string
+			_ = tx.QueryRow(ctx, `SELECT id FROM bot_flows WHERE slug='buy_flow' AND is_active=true`).Scan(&buyFlowID)
+			if buyFlowID != "" {
+				firstQ, err := e.findFirstQuestion(ctx, tx, buyFlowID)
+				if err == nil {
+					_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=$1, current_question_id=$2, updated_at=now() WHERE id=$3`, buyFlowID, firstQ.ID, convID)
+					if leadID != "" {
+						_, _ = tx.Exec(ctx, `UPDATE leads SET intent='BUY', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
+					}
+					return firstQ.QuestionText, true, nil
+				}
+			}
+		}
+
+		// User specified concrete vehicle criteria (e.g. "i want bmw m4", "sedan under 50000"):
+		// Clear flow and trigger search & matching!
 		if leadID != "" {
 			_, _ = tx.Exec(ctx, `UPDATE leads SET intent='BUY', extracted_data = extracted_data - 'sell_mode', updated_at=now() WHERE id=$1`, leadID)
 		}
@@ -761,25 +892,9 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		nlp.HasSearchSignals = true
 	}
 
-	// 6. Sell Intent Handling
-	data, _ := e.loadLeadExtractedData(ctx, tx, leadID)
-	isSellMode := false
-	if sm, ok := getString(data, "sell_mode"); ok && (sm == "true" || sm == "1") {
-		isSellMode = true
-	}
-
-	isSellMsg := (nlp.Intent == IntentSell || nlp.HasSellSignals || isSellRequest(lowerBody) || isSellMode) && !explicitBuy
+	// 9. Sell Intent Handling
+	isSellMsg := (nlp.Intent == IntentSell || nlp.HasSellSignals || isSellRequest(lowerBody) || isSellMode || lowerBody == "2") && !isBuyIntent
 	if isSellMsg {
-		// If user is already in sell_flow, check if they are just answering a survey question
-		// (e.g. typing model, year, km, fuel, etc.) rather than sending an explicit sell command
-		var flowSlug string
-		if currentQuestion != nil {
-			_ = tx.QueryRow(ctx, `SELECT slug FROM bot_flows WHERE id=$1`, currentQuestion.FlowID).Scan(&flowSlug)
-		}
-		inSellFlow := flowSlug == "sell_flow"
-
-		// If user is inside sell_flow and the message is NOT an explicit sell command:
-		// LET THE FLOW QUESTIONS CONTINUE! Do NOT cut off the questionnaire!
 		if inSellFlow && !isSellRequest(lowerBody) {
 			return "", false, nil
 		}
@@ -825,8 +940,8 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			}
 
 			sID := uuid.NewString()
-			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, km, fuel, transmission, condition, location, status)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Good', '', 'VALUATION_PENDING')`,
+			_, _ = tx.Exec(ctx, `INSERT INTO sell_requests (id, lead_id, brand, model, year, km, fuel, transmission, condition, location, photo_count, status)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Good', '', 0, 'VALUATION_PENDING')`,
 				sID, leadID, brand, model, year, km, fuel, trans)
 
 			if leadID != "" {
@@ -834,7 +949,7 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 			}
 			_, _ = tx.Exec(ctx, `UPDATE conversations SET current_flow_id=NULL, current_question_id=NULL, updated_at=now() WHERE id=$1`, convID)
 
-			reply := fmt.Sprintf("📋 *Vehicle Submission Received!*\n\nThank you! We have received your car details for *%d %s %s*:\n• 🛣️ *Mileage*: %s km\n• ⛽ *Fuel*: %s | ⚙️ *Transmission*: %s\n\n📋 *Status*: Under Manual Review & Valuation\nOur valuation team will review your vehicle details and contact you shortly with an official valuation offer!",
+			reply := fmt.Sprintf("📋 *Vehicle Submission Received!*\n\nThank you! We have received your car details for *%d %s %s*:\n• 🛣️ *Mileage*: %s km\n• ⛽ *Fuel*: %s | ⚙️ *Transmission*: %s\n• 📸 *Photos*: Pending upload\n\n📋 *Status*: Under Manual Review & Valuation\nOur valuation team will review your vehicle details and contact you shortly with an official valuation offer!",
 				year, brand, model, FormatPrice(km), fuel, trans)
 			return reply, true, nil
 		}
@@ -876,7 +991,7 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		return "🚗 *Sell Your Car Instantly!*\n\nPlease tell us your car's Brand, Model, Manufacturing Year, and approximate Mileage (e.g. *\"2019 Honda City, 45,000 km\"*).\n\nWe will review your vehicle and contact you with an official valuation offer!", true, nil
 	}
 
-	// 6. Direct Vehicle Selection (#1, #2, etc.)
+	// 8. Direct Vehicle Selection (#1, #2, etc.)
 	data, _ = e.loadLeadExtractedData(ctx, tx, leadID)
 	matchIDsStr, hasMatches := getString(data, "match_ids")
 
@@ -898,13 +1013,8 @@ func (e *Engine) handleConversationalNLP(ctx context.Context, tx pgx.Tx, convID,
 		}
 	}
 
-	// 7. Check if user is merely answering the active question
-	if isAnsweringCurrentQuestion(currentQuestion, nlp, body) {
-		return "", false, nil
-	}
-
-	// 8. Instant Search & Inventory Match (Automated Buying)
-	if nlp.HasSearchSignals {
+	// 9. Instant Search & Inventory Match (Automated Buying)
+	if nlp.HasSearchSignals && (nlp.Brand != "" || nlp.Model != "" || nlp.BodyType != "" || nlp.BudgetMax > 0) {
 		updates := map[string]any{}
 		if nlp.Brand != "" {
 			updates["brand"] = nlp.Brand

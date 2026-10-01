@@ -1565,26 +1565,35 @@ func (w *Worker) HandleMedia(ctx context.Context, phone, name, waMsgID string, d
 		return "", nil
 	}
 	ack := "Photo received and saved."
-	switch state {
-	case "DONE":
-		// Request already closed (e.g. valuation recorded): don't reopen the
-		// flow with photo noise, just close the loop politely.
-		ack = "Thanks! Your request is already recorded — our team will call you. Reply BUY or SELL for anything new."
-	case "SELL_PHOTOS":
-		data := map[string]string{}
-		_ = json.Unmarshal(stateRaw, &data)
-		n := atoi(data["sell_photos"]) + 1
-		if n >= 10 {
-			ack = "10 photos are enough, thank you! Reply *DONE* and we'll proceed to valuation."
-			n = 10
+	if w.Engine != nil {
+		reply, err := w.Engine.ProcessMessage(ctx, tx, convID, custID, leadID, "[photo]")
+		if err == nil && reply != "" {
+			ack = reply
 		} else {
-			ack = "Photo saved. Keep sending, then reply *DONE*."
+			ack += " Our team can view it. How can I help — *BUY* or *SELL*?"
 		}
-		data["sell_photos"] = strconv.Itoa(n)
-		m, _ := json.Marshal(dataWithPrev(data, state))
-		_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1, updated_at=now() WHERE id=$2`, string(m), leadID)
-	default:
-		ack += " Our team can view it. How can I help — *BUY* or *SELL*?"
+	} else {
+		switch state {
+		case "DONE":
+			// Request already closed (e.g. valuation recorded): don't reopen the
+			// flow with photo noise, just close the loop politely.
+			ack = "Thanks! Your request is already recorded — our team will call you. Reply BUY or SELL for anything new."
+		case "SELL_PHOTOS":
+			data := map[string]string{}
+			_ = json.Unmarshal(stateRaw, &data)
+			n := atoi(data["sell_photos"]) + 1
+			if n >= 10 {
+				ack = "10 photos are enough, thank you! Reply *DONE* and we'll proceed to valuation."
+				n = 10
+			} else {
+				ack = "Photo saved. Keep sending, then reply *DONE*."
+			}
+			data["sell_photos"] = strconv.Itoa(n)
+			m, _ := json.Marshal(dataWithPrev(data, state))
+			_, _ = tx.Exec(ctx, `UPDATE leads SET state_data=$1, updated_at=now() WHERE id=$2`, string(m), leadID)
+		default:
+			ack += " Our team can view it. How can I help — *BUY* or *SELL*?"
+		}
 	}
 	_, _ = tx.Exec(ctx, `INSERT INTO messages(conversation_id,direction,body,status) VALUES($1,'out',$2,'SENT')`, convID, ack)
 	if err := tx.Commit(ctx); err != nil {
